@@ -672,8 +672,8 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 	return arrow.Field{Type: extensions.NewDefaultVariantType()}
 }
 
-func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+func (c convertToArrow) VisitGeometry(g iceberg.GeometryType, tableProperties *iceberg.Properties) arrow.Field {
+	meta, err := icebergCRSToGeoArrowMetadata(g.CRS(), tableProperties)
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -687,8 +687,8 @@ func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
 	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
 }
 
-func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+func (c convertToArrow) VisitGeography(g iceberg.GeographyType, tableProperties *iceberg.Properties) arrow.Field {
+	meta, err := icebergCRSToGeoArrowMetadata(g.CRS(), tableProperties)
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -1973,7 +1973,7 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 
 var authorityCodeCRS = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+$`)
 
-func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
+func icebergCRSToGeoArrowMetadata(crs string, tableProperties *iceberg.Properties) (geoarrow.Metadata, error) {
 	lowerCRS := strings.ToLower(crs)
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
@@ -1991,7 +1991,22 @@ func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
 	}
 
 	if strings.HasPrefix(lowerCRS, "projjson:") {
-		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS not supported yet", iceberg.ErrInvalidSchema)
+		if tableProperties == nil {
+			return geoarrow.Metadata{}, fmt.Errorf("table properties required for resolving projjson crs '%q'", crs)
+		}
+
+		fullProjJson := tableProperties.Get(crs, "")
+		if fullProjJson == "" {
+			return geoarrow.Metadata{}, fmt.Errorf("projjson CRS '%q' not found in table properties", crs)
+		}
+		projjsonBytes, err := json.Marshal(fullProjJson)
+		if err != nil {
+			return geoarrow.Metadata{}, fmt.Errorf("failed to marshal projjson: %w", err)
+		}
+		return geoarrow.Metadata{
+			CRS:     projjsonBytes,
+			CRSType: geoarrow.CRSTypePROJJSON,
+		}, nil
 	}
 
 	var raw []byte
