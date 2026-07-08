@@ -460,7 +460,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 	// Calling the converter directly (outside the schema visitor) must not panic:
 	// an unsupported CRS comes back as an error, symmetric with the read path.
 	t.Run("projjson returns an error instead of panicking", func(t *testing.T) {
-		_, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs")
+		_, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs", nil)
 		require.Error(t, err)
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 		require.ErrorContains(t, err, "projjson CRS not supported yet")
@@ -478,7 +478,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.crs, func(t *testing.T) {
-				meta, err := icebergCRSToGeoArrowMetadata(tc.crs)
+				meta, err := icebergCRSToGeoArrowMetadata(tc.crs, nil)
 				require.NoError(t, err)
 				assert.Equal(t, tc.wantCRSType, meta.CRSType)
 			})
@@ -486,7 +486,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 	})
 
 	t.Run("srid:0 maps to an omitted CRS", func(t *testing.T) {
-		meta, err := icebergCRSToGeoArrowMetadata("srid:0")
+		meta, err := icebergCRSToGeoArrowMetadata("srid:0", nil)
 		require.NoError(t, err)
 		assert.Empty(t, meta.CRS)
 		assert.Empty(t, meta.CRSType)
