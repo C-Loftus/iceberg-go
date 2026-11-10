@@ -271,7 +271,7 @@ cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Pr
 
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
 // handle err
-cat := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 </code></pre>
 <h4 id="hive"><a class="header" href="#hive">Hive</a></h4>
 <pre><code class="language-go">import (
@@ -287,9 +287,10 @@ cat, err := hive.NewCatalog(iceberg.Properties{},
 <pre><code class="language-go">import (
     &quot;github.com/apache/iceberg-go&quot;
     &quot;github.com/apache/iceberg-go/catalog/hadoop&quot;
+    &quot;context&quot;
 )
 
-cat, err := hadoop.NewCatalog(&quot;default&quot;, &quot;file:///tmp/warehouse&quot;, iceberg.Properties{})
+cat, err := hadoop.NewCatalog(context.Background(), &quot;default&quot;, &quot;file:///tmp/warehouse&quot;, iceberg.Properties{})
 </code></pre>
 <h4 id="via-the-registry"><a class="header" href="#via-the-registry">Via the registry</a></h4>
 <p><code>catalog.Load</code> looks up the right backend via the <code>type</code> property (or <code>uri</code> scheme as a fallback) plus your <code>~/.iceberg-go.yaml</code>. Useful when you want runtime selection:</p>
@@ -303,7 +304,11 @@ cat, err := catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{
     &quot;uri&quot;:       &quot;http://localhost:8181&quot;,
     &quot;warehouse&quot;: &quot;s3://my-bucket/warehouse&quot;,
 })
+if err != nil { panic(err) }
+defer cat.Close()
 </code></pre>
+<p>Every catalog implements <code>Close() error</code>. Close it when done to release catalog-owned
+resources. A caller-supplied database connection remains caller-owned.</p>
 <h3 id="namespaces"><a class="header" href="#namespaces">Namespaces</a></h3>
 <pre><code class="language-go">ns := table.Identifier{&quot;sales&quot;}
 
@@ -444,6 +449,20 @@ if err != nil { /* ... */ }
 
 arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 </code></pre>
+<h3 id="incremental-changelog-scans"><a class="header" href="#incremental-changelog-scans">Incremental changelog scans</a></h3>
+<p><code>NewIncrementalChangelogScan</code> returns rows added or deleted between snapshots. <code>PlanFiles</code> returns the tasks. <code>Read</code> reads a planned task list, and <code>ToArrowRecords</code> plans and reads. Remote planning is not supported.</p>
+<pre><code class="language-go">schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields(&quot;id&quot;, &quot;name&quot;),
+).FromSnapshotExclusive(startSnapshotID).ToArrowRecords(ctx)
+</code></pre>
+<p><code>FromSnapshotInclusive</code>, <code>FromSnapshotExclusive</code>, and <code>ToSnapshot</code> bound the snapshot range. Projection, row filters, and limits apply while the rows are read. If the start snapshot has been expired, changes in expired snapshots before the oldest retained one are not reported. Each snapshot that adds deletes is planned against every live data file, narrowed only by the partition filter, so the cost follows the table size rather than the size of the snapshot range.</p>
+<p>Each batch is the scan projection followed by three columns:</p>
+<ul>
+<li><code>_change_type</code> — <code>INSERT</code> or <code>DELETE</code></li>
+<li><code>_change_ordinal</code> — int32 ordinal of the snapshot that produced the change</li>
+<li><code>_commit_snapshot_id</code> — snapshot ID that committed the change</li>
+</ul>
+<p>Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. <code>UPDATE</code> rows are not produced. Delete-file handling is iceberg-go behavior.</p>
 <h2 id="writing-data"><a class="header" href="#writing-data">Writing data</a></h2>
 <p>The shortcut methods on <code>Table</code> open a transaction, perform the write, and commit. Use <code>NewTransaction</code> directly when you need to combine multiple operations.</p>
 <h3 id="append"><a class="header" href="#append">Append</a></h3>
@@ -471,6 +490,35 @@ newTbl, err = tbl.Overwrite(ctx, recordReader, nil,
 )
 </code></pre>
 <p><code>OverwriteTable</code> is the <code>arrow.Table</code> variant.</p>
+<h3 id="dynamic-partition-overwrite"><a class="header" href="#dynamic-partition-overwrite">Dynamic partition overwrite</a></h3>
+<p>Replace only the partitions present in the incoming data. Unlike a filtered
+row-level overwrite, this removes <strong>all existing data files</strong> in those partitions
+while retaining files in other partitions.</p>
+<pre><code class="language-go">// Write Arrow record batches, replacing only partitions receiving new rows.
+newTbl, err := tbl.DynamicPartitionOverwrite(ctx, recordReader, nil)
+
+// In-memory Arrow tables work too.
+newTbl, err = tbl.DynamicPartitionOverwriteTable(ctx, arrowTbl, 1024, nil)
+
+// Or commit already-written Iceberg DataFile metadata through a transaction.
+txn := tbl.NewTransaction()
+err = txn.DynamicPartitionOverwriteDataFiles(ctx, newDataFiles, nil)
+if err == nil {
+    newTbl, err = txn.Commit(ctx)
+}
+</code></pre>
+<p>This supports Iceberg format v1-v3. Incoming files must use the current
+partition spec. On partitioned tables, files under older specs are preserved;
+only matching current-spec partitions are replaced. If the current spec is
+unpartitioned, non-empty input replaces all live files, including files under
+older specs. For v3, replacement also removes deletion vectors tied to
+replaced data files. Empty input leaves the table untouched.</p>
+<p>A concurrent add or removal in a replaced partition fails validation, while
+independent changes to other partitions can be retried after a catalog refresh.
+A new target branch also pins the source branch to prevent missing concurrent
+writes. Default partition-spec and sort-order changes fail validation. Written
+data files are not automatically cleaned up if staging or commit fails, so
+callers must handle those files before retrying with a new transaction.</p>
 <h3 id="delete"><a class="header" href="#delete">Delete</a></h3>
 <pre><code class="language-go">newTbl, err := tbl.Delete(ctx,
     iceberg.LessThan(iceberg.Reference(&quot;id&quot;), int64(100)),
@@ -480,7 +528,7 @@ newTbl, err = tbl.Overwrite(ctx, recordReader, nil,
 <h3 id="add-existing-files"><a class="header" href="#add-existing-files">Add existing files</a></h3>
 <p>When you already have data files (e.g. produced by another writer), register them without rewriting:</p>
 <pre><code class="language-go">txn := tbl.NewTransaction()
-err := txn.AddFiles(ctx, []string{
+err := txn.AddDataFilesByPath(ctx, []string{
     &quot;s3://my-bucket/sales/orders/data/file-1.parquet&quot;,
     &quot;s3://my-bucket/sales/orders/data/file-2.parquet&quot;,
 }, nil /* snapshot props */, false /* ignoreDuplicates */)
@@ -488,7 +536,33 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
-<p><code>ReplaceDataFiles(ctx, filesToDelete, filesToAdd, snapshotProps)</code> and <code>ReplaceDataFilesWithDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code> are also available on <code>*Transaction</code> for swapping files atomically.</p>
+<p><code>ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)</code> performs an
+<strong>overwrite</strong> of existing files. It is suitable when the logical table data
+changes. <code>ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code>
+is the corresponding data-file metadata API.</p>
+<h3 id="stage-externally-rewritten-parquet-files"><a class="header" href="#stage-externally-rewritten-parquet-files">Stage externally rewritten Parquet files</a></h3>
+<p>When another engine has <strong>already written</strong> replacement Parquet files with the
+same live rows and physical record count, use
+<code>StageRewrittenDataFilesByPath</code>. This stages an Iceberg <code>replace</code> snapshot
+instead of an <code>overwrite</code>, but it does not read or rewrite the row data:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+err := txn.StageRewrittenDataFilesByPath(ctx, oldFilePaths, newFilePaths, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>This path-only helper supports unpartitioned format v1 and v2 tables. It rejects
+a source file with any applicable position or equality deletes, as well as
+deletion vectors. It requires the same total physical record count and checks
+column value, null, and NaN counts when available for every file on both sides.
+Missing optional statistics are unknown, not zero. A source column with known
+value counts cannot disappear when replacement metrics collection is enabled.
+Footer metadata cannot prove row-level equivalence, so callers must preserve
+every live row. Format v3 and partitioned tables are not supported, including
+older partitioned specs that are no longer current.</p>
+<p>For compaction that must <strong>apply deletes</strong>, remove delete files, or rewrite
+partitioned data, use <code>RewriteDataFiles</code>. An external writer that needs to
+supply data-file metadata, a sequence number, or related delete-file changes
+can use <code>NewRewrite</code> with <code>FileToDataFile</code> instead.</p>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Group writes and metadata changes into one atomic snapshot:</p>
 <pre><code class="language-go">txn := tbl.NewTransaction()
@@ -507,9 +581,23 @@ if err := txn.SetProperties(iceberg.Properties{&quot;commit.user&quot;: &quot;da
 newTbl, err := txn.Commit(ctx)
 </code></pre>
 <p>To target a specific branch:</p>
-<pre><code class="language-go">txn := tbl.NewTransactionOnBranch(&quot;staging&quot;)
+<pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;staging&quot;)
+if err != nil { /* ... */ }
 </code></pre>
-<p><code>Commit</code> retries automatically on conflict (<code>ErrCommitFailed</code>) - tune via the <code>commit.retry.*</code> table properties.</p>
+<p>Cherry-pick an existing snapshot onto the transaction's target branch:</p>
+<pre><code class="language-go">err := txn.CherryPickSnapshot(ctx, sourceSnapshotID, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>A direct-child source fast-forwards without copying data and ignores
+<code>snapshotProps</code>. A divergent v1/v2 append is replayed with fresh snapshot
+metadata; user-supplied WAP publication markers are not trusted. Divergent v3
+appends and divergent replace-partitions overwrites are tracked in
+<a href="https://github.com/apache/iceberg-go/issues/2415">issue #2415</a>. Cherry-picks
+pin the refs they rely on. Divergent replays onto new branches also pin main;
+fast-forwards onto new branches do not. A moved pinned ref fails the commit;
+other conflicts can be retried under the normal commit retry policy.</p>
+<p><code>Commit</code> retries a conflict (<code>ErrCommitFailed</code>) up to <code>commit.retry.num-retries</code> times, 4 by default. See <a href="./concurrent-writes.html#automatic-retry">Automatic retry</a> for the <code>commit.retry.*</code> table properties.</p>
 <h2 id="schema-and-partition-evolution"><a class="header" href="#schema-and-partition-evolution">Schema and partition evolution</a></h2>
 <h3 id="schema-evolution"><a class="header" href="#schema-evolution">Schema evolution</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
@@ -546,6 +634,25 @@ for _, s := range tbl.Metadata().Snapshots() {
     fmt.Println(s.SnapshotID, s.Summary)
 }
 </code></pre>
+<h3 id="comparing-physical-files-between-snapshots-v1-v3"><a class="header" href="#comparing-physical-files-between-snapshots-v1-v3">Comparing physical files between snapshots (v1-v3)</a></h3>
+<p>Use <code>tbl.Inspect().DiffSnapshotFiles</code> to compare the live content files
+referenced by two snapshot IDs, including snapshots on different branches:</p>
+<pre><code class="language-go">diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+if err != nil {
+    return err
+}
+for _, file := range diff.AddedDataFiles {
+    fmt.Println(&quot;added:&quot;, file.FilePath())
+}
+</code></pre>
+<p>The result also includes removed data files and added/removed delete files,
+including positional deletes, equality deletes, and v3 deletion vectors.
+Shared immutable manifests are skipped. Entries are read with a minimal
+projection, so returned files do not contain complete column statistics and
+must <strong>not</strong> be passed to a <code>ManifestWriter</code>. This compares <strong>physical files</strong>,
+not logical row changes.</p>
+<p>See the <a href="https://iceberg.apache.org/spec/#snapshots">Iceberg snapshot specification</a>
+and <a href="https://iceberg.apache.org/spec/#manifests">manifest specification</a>.</p>
 <h3 id="branches-and-tags"><a class="header" href="#branches-and-tags">Branches and tags</a></h3>
 <p>The CLI's <code>branch create</code> and <code>tag create</code> commands (<a href="./cli.html">CLI</a>) are the most ergonomic surface today. Programmatically, ref creation goes through <code>Catalog.CommitTable</code> with a <code>SetSnapshotRef</code> update:</p>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
@@ -575,6 +682,37 @@ err := txn.ExpireSnapshots(/* options */)
 err = txn.RollbackToSnapshot(targetSnapshotID)
 </code></pre>
 <p>Tune retention with the <code>history.expire.min-snapshots-to-keep</code>, <code>history.expire.max-snapshot-age-ms</code>, and <code>history.expire.max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
+<h3 id="snapshot-integrity-audit-v1-and-later"><a class="header" href="#snapshot-integrity-audit-v1-and-later">Snapshot integrity audit (v1 and later)</a></h3>
+<p>Use <code>ValidateSnapshot</code> to inspect a snapshot's manifest list and entries without
+changing table data. This is especially useful for checking imported v1 tables
+before allowing them into production.</p>
+<pre><code class="language-go">report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+if err != nil {
+    return err // I/O failed or the scan was canceled; report may be incomplete.
+}
+if !report.Valid() {
+    for _, issue := range report.Issues {
+        fmt.Printf(&quot;%s: %s (%s)\n&quot;, issue.Code, issue.FilePath, issue.ManifestPath)
+    }
+}
+</code></pre>
+<p>The report checks manifest versions, partition spec references, content types,
+manifest entry counts, duplicate manifest paths, and duplicate live content files
+across <strong>all</strong> manifests in a snapshot. It also checks that live deletion vectors
+have a target path, that their blob ranges fit within the recorded file size,
+and that no two distinct vectors target the same data file.
+Deleted entries do not count as live.
+A report is valid only when <code>Complete</code> is true and <code>Issues</code> is empty.
+This is a metadata-only audit: it does not check data-file contents or whether
+data-file objects still exist. The audit works with both v1 manifest lists and
+older v1 snapshots containing embedded <code>manifests</code> paths. For embedded
+manifests, the partition spec ID is checked against table metadata when the
+optional header provides it, or inferred when the partition fields match exactly
+one historical spec. Missing, ambiguous, or mismatched partition specs are
+reported as issues rather than silently accepted.</p>
+<p>The file uniqueness and manifest requirements come from the
+<a href="https://iceberg.apache.org/spec/#content-file-uniqueness">Iceberg spec</a>
+and <a href="https://iceberg.apache.org/spec/#manifest-lists">manifest list spec</a>.</p>
 <h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
@@ -604,6 +742,19 @@ fmt.Printf(&quot;rewrote %d files into %d (%d -&gt; %d bytes)\n&quot;,
     result.RemovedDataFiles, result.AddedDataFiles, result.BytesBefore, result.BytesAfter)
 </code></pre>
 <p>The <code>table/compaction</code> subpackage provides bin-packing planning. The <code>iceberg compact analyze</code> and <code>compact run</code> CLI commands wrap the same machinery - see <a href="./cli.html">CLI</a>.</p>
+<p>Compaction tasks represent complete data files, not independent scan splits. The planner collapses split tasks for the same file into one whole-file task, rejecting inconsistent delete or lineage metadata and dropping residual filters because they select files but do not filter rows during compaction. Direct calls to <code>ExecuteCompactionGroup</code> reject partial ranges and residual row filters. Attached delete files are still applied when rewriting each source file.</p>
+<p>To sort instead of bin-pack, pass <code>table.WithCompactionSortOrder</code> as a group option. Each group is sorted as a whole, so every output file holds a sorted, non-overlapping range of it. Output files record the order's <code>sort_order_id</code> when the order is one of the table's sort orders, every field has one source column, every field but the last is identity and the last preserves order (see <code>table.WithCompactionSortOrder</code>). Files of different groups still overlap, and by default a group is packed to one target file, so raise <code>compaction.Config.MaxGroupSizeBytes</code> until a group covers a partition. Set <code>compaction.Config.RewriteAll</code> to also rewrite files that are already well-sized:</p>
+<pre><code class="language-go">cfg := compaction.DefaultConfig()
+cfg.RewriteAll = true
+cfg.MaxGroupSizeBytes = 8 &lt;&lt; 30 // 8 GiB per group
+plan, err := compaction.Analyze(ctx, tbl, cfg)
+if err != nil { /* ... */ }
+
+result, err := txn.RewriteDataFiles(ctx, groups /* from plan.Groups */, table.RewriteDataFilesOptions{
+    GroupOptions: []table.CompactionGroupOption{table.WithCompactionSortOrder(tbl.SortOrder())},
+})
+</code></pre>
+<p>When every file of a group already records the order's <code>sort_order_id</code> (for example, files written by an earlier sort rewrite), every sort field is identity, and no partition of the group has more files than the scan concurrency (<code>table.WithCompactionScanConcurrency</code>, <code>GOMAXPROCS</code> by default), the files are streamed and merged, holding up to about five batches per file instead of the whole group. Otherwise a sort rewrite holds each group decoded in memory, and with the batches queued for the writer that can reach about twice the group's decoded size, so keep <code>compaction.Config.MaxGroupSizeBytes</code> within what one rewrite can hold. The first sort rewrite of a table always takes this in-memory path, since its files do not record the order yet. The CLI equivalent is <code>iceberg compact run --sort [--rewrite-all] [--max-group-size BYTES]</code>, which uses the table's default sort order.</p>
 <h3 id="expiring-snapshots"><a class="header" href="#expiring-snapshots">Expiring snapshots</a></h3>
 <pre><code class="language-go">import (
     &quot;time&quot;
@@ -631,18 +782,21 @@ v, err := view.CreateView(
     &quot;my-catalog&quot;,
     table.Identifier{&quot;analytics&quot;, &quot;monthly_orders&quot;},
     schema,
-    &quot;SELECT month, sum(amount) FROM orders GROUP BY month&quot;,
+    view.Representation{SQL: &quot;SELECT month, sum(amount) FROM orders GROUP BY month&quot;, Dialect: &quot;spark&quot;},
     table.Identifier{&quot;sales&quot;},                      // default namespace for unqualified names
     &quot;s3://my-bucket/views/monthly_orders&quot;,
     iceberg.Properties{},
 )
 
 // Inspect
-v.CurrentVersion()      // *view.Version
-v.CurrentSchema()       // *iceberg.Schema
-v.Versions()            // []*view.Version
-v.Schemas()             // map[int]*iceberg.Schema
-v.Properties()          // iceberg.Properties
+v.CurrentVersion()        // *view.Version
+v.CurrentSchema()         // *iceberg.Schema
+v.Versions()              // []*view.Version
+v.VersionByID(1)          // *view.Version, or nil
+v.VersionAsOf(timestampMs) // *view.Version, or nil (Unix milliseconds)
+v.History()               // []view.VersionLogEntry
+v.Schemas()               // map[int]*iceberg.Schema
+v.Properties()            // iceberg.Properties
 </code></pre>
 <p><code>view.New(ident, meta, metadataLocation)</code> constructs a view from already-loaded metadata; <code>view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)</code> loads metadata from disk or object storage.</p>
 <h2 id="iceberg--arrow-types"><a class="header" href="#iceberg--arrow-types">Iceberg ↔ Arrow types</a></h2>

@@ -249,6 +249,153 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Schema reads now reject invalid identifier fields.</strong> Table and view metadata with <code>identifier-field-ids</code> referring to an optional, float/double, missing, non-primitive, or improperly nested field now fails to load with <code>invalid schema</code> (for example, <code>invalid schema: identifier field &quot;foo&quot; must be required</code> or <code>invalid schema: identifier field &quot;foo&quot; cannot be float or double</code>). Older iceberg-go releases could load such metadata, but Java Iceberg already rejects it. To recover an affected table, back up its metadata and use an atomic catalog metadata repair to remove the invalid identifier IDs or replace them with IDs of existing, required, non-floating primitive fields nested only in required structs. Do not edit the currently referenced metadata file in place. Repeated identifier IDs are deduplicated on read.</p>
+</li>
+<li>
+<p><strong><code>StructType.Fields()</code> returns a copy.</strong> Changing the returned slice no longer changes the struct, matching <code>ListType.Fields()</code> and <code>MapType.Fields()</code>. Build a new type with <code>NewStructType</code> instead. <code>NumFields()</code> and <code>Field(i)</code> read fields without copying, and <code>NewListType</code> and <code>NewMapType</code> are the constructors for the other nested types. The exported fields are unchanged for now; they become unexported before v1.0.0 (see <a href="https://github.com/apache/iceberg-go/issues/2062">#2062</a>).</p>
+</li>
+<li>
+<p><strong><code>io.StatIO.Stat</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>StatIO</code> implementations and callers must pass the operation context.</p>
+</li>
+<li>
+<p><strong>Commits retry conflicts by default.</strong> <code>commit.retry.num-retries</code> now defaults to <code>4</code>, as in Java and PyIceberg, so <code>Commit</code> refreshes and replays a conflicting commit up to four times before returning <code>ErrCommitFailed</code>. Set it to <code>0</code> to keep failing on the first conflict. <code>table.CommitNumRetriesDefault</code> changes from <code>0</code> to <code>4</code>.</p>
+</li>
+<li>
+<p><strong>Schemas store binary and fixed defaults as hex strings.</strong> <code>NewSchema</code>, <code>NewSchemaWithIdentifiers</code> and <code>UpdateSchema.AddColumn</code> (through <code>Apply()</code>) convert <code>[]byte</code>, <code>BinaryLiteral</code> and <code>FixedLiteral</code> defaults of binary and fixed fields, including fields nested in structs, lists and maps, to the lowercase hex string iceberg-go writes to metadata JSON, so a field read back from a schema holds a <code>string</code> such as <code>&quot;0aff&quot;</code>. Code that type-asserts these defaults to <code>[]byte</code> must decode the string instead, for example with <code>hex.DecodeString</code>. A schema built in process now equals the same schema read from metadata with lowercase hex. <code>Equals</code> compares the strings case-sensitively, and Java writes uppercase hex (see <a href="https://github.com/apache/iceberg/issues/18352">apache/iceberg#18352</a>). The fields and types passed in are not modified.</p>
+</li>
+<li>
+<p><strong>Predicates reject NaN literals when bound.</strong> <code>EqualTo</code>, <code>NotEqualTo</code>, <code>LessThan</code>, <code>LessThanEqual</code>, <code>GreaterThan</code>, <code>GreaterThanEqual</code>, <code>IsIn</code>, <code>NotIn</code> and <code>LiteralPredicate</code>/<code>SetPredicate</code> with a NaN float literal now fail in <code>Bind</code> with <code>ErrInvalidArgument</code>, as Java does. That includes the string <code>&quot;NaN&quot;</code> on a float column and a NaN on a decimal column, which used to bind as zero. Scans, <code>ExpressionEvaluator</code> and the metrics evaluators all bind first, so they return the error too. Use <code>IsNaN</code> and <code>NotNaN</code> to match NaN values.</p>
+</li>
+<li>
+<p><strong>SQL view APIs align with <code>catalog.ViewCatalog</code>.</strong> <code>CreateView</code> now takes a <code>*view.Version</code>, schema and options, and returns <code>*view.View</code>. <code>LoadView</code> now returns <code>*view.View</code>; use <code>Metadata()</code> to access its metadata. If the caller leaves <code>DefaultCatalog</code> empty, SQL still sets it to the catalog name.</p>
+</li>
+<li>
+<p><strong><code>LocationProvider.NewDataLocation</code> takes the partition path.</strong> The method is now <code>NewDataLocation(dataFileName, partitionPath string)</code>, matching Iceberg Java and PyIceberg, so custom <code>LocationProvider</code> implementations must add the argument. Callers pass the partition path there, or <code>&quot;&quot;</code> for an unpartitioned file, instead of prefixing the file name.</p>
+</li>
+<li>
+<p><strong>Partitioned data files follow the table's location provider.</strong> With <code>write.object-storage.enabled=true</code> and the default <code>write.object-storage.partitioned-paths=true</code>, new partitioned files land under <code>data/&lt;hash&gt;/&lt;partition&gt;/</code> instead of <code>data/&lt;partition&gt;/&lt;hash&gt;/</code>, which can affect prefix-based lifecycle rules and bucket policies. <code>write.object-storage.partitioned-paths=false</code> and <code>write.data.path</code> now apply to partitioned writes. Partitioned paths also no longer percent-encode the table location: <code>s3://bucket/my table</code> stays literal instead of becoming <code>my%20table</code>, as for unpartitioned writes. Existing files stay where they are.</p>
+</li>
+<li>
+<p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST, Hive, and SQL), while REST also implements <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
+</li>
+<li>
+<p><strong><code>ReplaceFilesWithDeleteFiles</code> removed.</strong> For delete-file replacements, use <code>tx.NewRewrite(snapshotProps)</code>, call <code>DeleteFile</code> for each source file and <code>AddDeleteFileWithDataSequenceNumber</code> for each replacement, then commit the builder. Rewrites record a <code>replace</code> snapshot instead of <code>overwrite</code>. The five-argument <code>ReplaceFiles</code> API is unchanged and remains available for compaction and delete-file removals.</p>
+</li>
+<li>
+<p><strong>Manifest and deletion-vector reads take a context.</strong> <code>Snapshot.Manifests</code>, <code>ManifestFile.Entries</code>, <code>iceberg.EntriesWithProjection</code>, <code>dv.ReadDV</code> and <code>dv.ReadDVs</code> now take a <code>context.Context</code> first argument and pass it to <code>IO.Open</code>. Custom <code>ManifestFile</code> implementations must add it to <code>Entries</code>.</p>
+</li>
+<li>
+<p><strong>Path-based data-file addition renamed.</strong> Replace <code>Transaction.AddFiles</code> with <code>AddDataFilesByPath</code>, <code>AddFilesOption</code> with <code>AddDataFilesByPathOption</code>, and <code>WithAddFilesConcurrency</code> with <code>WithAddDataFilesByPathConcurrency</code>. Behavior is unchanged.</p>
+</li>
+<li>
+<p><strong>Manifest builder constructor renamed.</strong> Replace <code>iceberg.NewManifestFile(...)</code> with <code>iceberg.NewManifestBuilder(...)</code>. It still returns a <code>ManifestBuilder</code>.</p>
+</li>
+<li>
+<p><strong>Manifest sequence APIs use explicit names.</strong> <code>ManifestBuilder.SequenceNum</code> and <code>ManifestFile.SequenceNum</code> become <code>SequenceNumber</code>, and <code>ManifestFile.MinSequenceNum</code> becomes <code>MinSequenceNumber</code>. <code>ManifestEntryBuilder.SequenceNum</code> and <code>ManifestEntry.SequenceNum</code> become <code>DataSequenceNumber</code>. <code>FileSequenceNum</code> becomes <code>FileSequenceNumber</code> for entries and their builder. Avro and JSON field names are unchanged.</p>
+</li>
+<li>
+<p><strong><code>io.ReadFileIO.ReadFile</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>ReadFileIO</code> implementations and callers must pass the operation context.</p>
+</li>
+<li>
+<p><strong>View and UDF metadata builder constructors are infallible.</strong> <code>view.NewMetadataBuilder</code> and <code>udf.NewMetadataBuilder</code> now return only a builder instead of <code>(builder, error)</code>; remove error handling at call sites.</p>
+</li>
+<li>
+<p><strong>Table metadata getter renamed.</strong> Replace <code>table.Metadata.Version()</code> with <code>table.Metadata.FormatVersion()</code>, consistent with Iceberg Java and Go view/UDF metadata. Metadata JSON is unchanged.</p>
+</li>
+<li>
+<p><strong>Snapshot ref type field renamed.</strong> Replace <code>table.SnapshotRef.SnapshotRefType</code> with <code>table.SnapshotRef.Type</code>. The JSON field is still <code>&quot;type&quot;</code>.</p>
+</li>
+<li>
+<p><strong>As-of snapshot lookups now use inclusive timestamps.</strong> Replace <code>tbl.SnapshotAsOf(timestampMs, true)</code> with <code>tbl.SnapshotAsOf(timestampMs)</code>. The method always selects the latest snapshot at or before the timestamp, matching Java Iceberg's <code>SnapshotUtil.nullableSnapshotIdAsOfTime</code>. For strict-before lookup, use <code>SnapshotLogEntryAsOf(tbl.Metadata().SnapshotLogs(), timestampMs, false)</code>.</p>
+</li>
+<li>
+<p><strong>Snapshot timestamp property key corrected.</strong> <code>PropertyCurrentSnapshotTimestamp</code> now uses <code>current-snapshot-timestamp-ms</code>. The old <code>current-snapshot-timestamp</code> spelling is no longer reserved and remains usable as a custom property.</p>
+</li>
+<li>
+<p><strong>FileIO open and remove take a context.</strong> <code>io.IO.Open</code> and <code>io.IO.Remove</code> now take a <code>context.Context</code> first argument, so custom <code>io.IO</code> implementations must add it. <code>maintenance.WithCleanupDeleteFunc</code> now takes <code>func(context.Context, string) error</code>.</p>
+</li>
+<li>
+<p><strong>Hadoop catalog construction takes a context.</strong> <code>hadoop.NewCatalog(name, warehouse, props)</code> becomes <code>hadoop.NewCatalog(ctx, name, warehouse, props)</code>. The context bounds filesystem setup; the catalog's filesystem keeps its values but not its cancellation.</p>
+</li>
+<li>
+<p><strong>Config loading reports errors.</strong> <code>config.LoadConfig</code> now returns <code>([]byte, error)</code>, and <code>config.LoadConfigFile</code> is removed; call <code>LoadConfig</code> instead. A missing default <code>~/.iceberg-go.yaml</code> still returns no data and no error.</p>
+</li>
+<li>
+<p><strong>Branch transactions return initialization errors.</strong> <code>Table.NewTransactionOnBranch(branch)</code> now returns <code>(*Transaction, error)</code>, and <code>Table.NewTransactionOnBranchWithError</code> is removed. Use <code>NewTransactionOnBranch</code> and handle its error.</p>
+</li>
+<li>
+<p><strong>Retries preserve staged update order.</strong> An append staged after <code>RollbackToSnapshot</code> stays on the rollback target after a retry or resumed <code>Commit</code>. If a staged update cannot apply after refresh, the transaction ends with <code>table.ErrTransactionUnusable</code>. For example, <code>UpgradeFormatVersion</code> cannot apply if a peer has committed a higher format version. The error preserves its cause and also matches <code>table.ErrCommitFailed</code> if that cause is a conflict. Previously, for transactions without a staged expiry, these failures returned <code>table.ErrCommitRejected</code> and left the transaction resumable. A catalog rejection on the first attempt still returns <code>table.ErrCommitRejected</code> and leaves the transaction resumable.</p>
+</li>
+<li>
+<p><strong>Retries renew snapshot timestamps.</strong> A retry or resumed <code>Commit</code> stamps each snapshot it replays from a staged write with the current time, at least one millisecond after its parent, as Java's <code>SnapshotProducer</code> does. A snapshot staged more than a minute before a peer's commit no longer fails the retry. The committed timestamp is the time of the attempt that lands, so an <code>ExpireSnapshots</code> staged after the write in the same transaction keeps that snapshot when the commit retries.</p>
+</li>
+<li>
+<p><strong>Snapshot expiration now tolerates concurrent ref changes.</strong> If a concurrent commit moves a ref that the expiry read, a retry or later <code>Commit</code> replans instead of failing with <code>table.ErrCommitFailed</code>. The committed expiry can differ from <code>Transaction.StagedTable</code>. See <a href="./concurrent-writes.html#snapshot-expiration">Snapshot expiration</a> for cases that now fail with <code>table.ErrTransactionUnusable</code>.</p>
+</li>
+<li>
+<p><strong>Schema JSON constructor uses the Go initialism.</strong> Replace <code>iceberg.NewSchemaFromJsonFields</code> with <code>iceberg.NewSchemaFromJSONFields</code>.</p>
+</li>
+<li>
+<p><strong>AWS identifiers use the Go initialism.</strong> <code>glue.AwsProperties</code>, <code>glue.WithAwsConfig</code> and <code>glue.WithAwsProperties</code> become <code>glue.AWSProperties</code>, <code>glue.WithAWSConfig</code> and <code>glue.WithAWSProperties</code>; <code>sigv4.WithAwsConfig</code> becomes <code>sigv4.WithAWSConfig</code>; <code>utils.WithAwsConfig</code> and <code>utils.GetAwsConfig</code> become <code>utils.WithAWSConfig</code> and <code>utils.GetAWSConfig</code>; and <code>config.CatalogConfig.AwsProfile</code> becomes <code>AWSProfile</code>. The <code>aws-profile</code> YAML key is unchanged.</p>
+</li>
+<li>
+<p><strong>KMS factory registration now takes a context.</strong> Change <code>encryption.KMSFactory</code> implementations to accept <code>(context.Context, map[string]string)</code> instead of only properties, and call <code>encryption.LoadKeyManagementClient(ctx, props)</code> instead of <code>LoadKeyManagementClient(props)</code>. The existing global <code>RegisterKMS</code>, <code>UnregisterKMS</code>, and <code>GetRegisteredKMSNames</code> functions still use the default registry; <code>RegisterKMS</code> still panics for invalid registrations. Use <code>encryption.MustRegisterKMS</code> for provider initialization. For isolated registrations, create <code>registry := encryption.NewKMSRegistry()</code> after importing any KMS providers and call <code>registry.Register</code>, <code>registry.Load(ctx, props)</code>, <code>registry.Names</code>, or <code>registry.Unregister</code>. New registries snapshot the global registrations; subsequent changes do not propagate.</p>
+</li>
+<li>
+<p><strong>Name-mapping child lookup renamed.</strong> Replace <code>MappedField.GetField(name)</code> with <code>MappedField.FindFieldByName(name)</code>, which returns <code>(*MappedField, bool)</code>. The new method returns a pointer to the actual child field rather than a copy, and reports a missing name with <code>false</code>.</p>
+</li>
+<li>
+<p><strong>Data file block size setter removed.</strong> <code>iceberg.DataFileBuilder.BlockSizeInBytes</code> is removed. New v1 manifests use the Avro schema's 64 MiB default when the field is unset. V2/v3 omit this deprecated field, and legacy v1 values remain readable.</p>
+</li>
+<li>
+<p><strong>View creation APIs take a named SQL representation.</strong> <code>view.NewVersionFromSQL</code>, <code>view.CreateView</code>, and <code>view.CreateViewWithIOProperties</code> now accept a <code>view.Representation{SQL: sql, Dialect: dialect}</code> instead of positional SQL/dialect strings. The dialect is required; Hive preserves the selected representation's dialect.</p>
+</li>
+<li>
+<p><strong>View SQL representation construction uses named fields.</strong> Replace <code>view.NewRepresentation(sql, dialect)</code> with <code>view.NewRepresentation(view.Representation{SQL: sql, Dialect: dialect})</code>. Serialized JSON is unchanged.</p>
+</li>
+<li>
+<p><strong>Hive views keep the caller's view version.</strong> <code>hive.Catalog.CreateView</code> now stores every representation, the summary, the default namespace and <code>default-catalog</code> as passed, instead of one representation with <code>default-catalog</code> set to <code>&quot;hive&quot;</code>.</p>
+</li>
+<li>
+<p><strong>Reserved table properties now use a read-only API.</strong> Replace references to <code>table.ReservedProperties</code> with <code>table.ReservedProperties()</code>. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.</p>
+</li>
+<li>
+<p><strong>Fixed and decimal constructors return errors.</strong> <code>iceberg.FixedTypeOf</code> and <code>iceberg.DecimalTypeOf</code> now return <code>(type, error)</code> instead of panicking for invalid inputs. Use <code>MustFixedTypeOf</code> or <code>MustDecimalTypeOf</code> only for known-valid values.</p>
+</li>
+<li>
+<p><strong>SQL UDF representations now use struct literals.</strong> The <code>udf.NewSQLRepresentation(dialect, sql)</code> function, available since v0.7.0, is removed. Use <code>udf.SQLRepresentation{Dialect: &quot;trino&quot;, SQL: &quot;x + 1&quot;}</code> instead. Empty fields and duplicate dialects are checked during metadata validation; serialized JSON is unchanged.</p>
+</li>
+<li>
+<p><strong>Filesystem adapter construction consolidated.</strong> Replace <code>io.FSPreProcName(fsys, fn)</code> with <code>io.FS(fsys, io.WithNamePreprocessor(fn))</code>. Plain <code>io.FS(fsys)</code> remains supported.</p>
+</li>
+<li>
+<p><strong>Table purge is required on catalogs.</strong> The <code>catalog.Catalog</code> interface now embeds <code>catalog.PurgeableCatalog</code>; every custom catalog implementation must provide <code>PurgeTable(ctx, identifier) error</code>. The narrow <code>catalog.PurgeableTable</code> interface is renamed to <code>catalog.PurgeableCatalog</code>. Built-in purge behavior is unchanged.</p>
+</li>
+<li>
+<p><strong>Unify statistics blob types with Puffin.</strong> Replace <code>table.BlobType</code> with <code>puffin.BlobType</code> when constructing <code>table.BlobMetadata</code>. Replace <code>table.BlobTypeApacheDatasketchesThetaV1</code> with <code>puffin.BlobTypeDataSketchesTheta</code> and <code>table.BlobTypeDeletionVectorV1</code> with <code>puffin.BlobTypeDeletionVector</code>. Use <code>puffin.BlobType.IsKnown()</code> to identify the types defined by the Puffin specification; the redundant <code>table.BlobType.IsValid()</code> method is removed. Unknown non-empty blob type names still round-trip through table metadata.</p>
+</li>
+<li>
+<p><strong>View representation field uses the Go SQL initialism.</strong> Replace <code>view.Representation.Sql</code> with <code>view.Representation.SQL</code>. Serialized view metadata still uses the <code>sql</code> JSON field.</p>
+</li>
+<li>
+<p><strong>Orphan cleanup results now expose only <code>OrphanFiles</code>.</strong> Replace <code>result.OrphanFileLocations</code> with <code>result.OrphanFiles</code> (each entry has <code>Path</code> and <code>SizeBytes</code>). <code>OrphanCleanupPlan.Files()</code> still provides path-only lists during planning.</p>
+</li>
+<li>
+<p><strong>Catalog identifier helper renamed.</strong> <code>catalog.TableNameFromIdent</code> is removed. Use <code>catalog.ObjectNameFromIdent</code> for tables, views, and functions.</p>
+</li>
+<li>
+<p><strong>Substrait expression conversion no longer takes case sensitivity.</strong> <code>substrait.ConvertExpr(schema, expression, caseSensitive)</code> becomes <code>substrait.ConvertExpr(schema, expression)</code>. Case sensitivity remains part of expression binding.</p>
+</li>
+<li>
+<p><strong>Transform formatting requires the result type and uses the Java-aligned method name.</strong> <code>Transform.ToHumanStr(value)</code> and <code>Transform.ToHumanStrType(resultType, value)</code> are removed. Use <code>Transform.ToHumanString(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
+</li>
+<li>
+<p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> is removed. Replace <code>cat.(catalog.Closer)</code> checks with <code>defer cat.Close()</code>; <code>catalog.Catalog</code> already implements <code>io.Closer</code>, so no type assertion is needed.</p>
+</li>
+<li>
+<p><strong>Puffin writer property setter renamed.</strong> <code>puffin.Writer.AddProperties</code> is now <code>puffin.Writer.SetProperties</code>. Repeated calls still merge keys; use <code>ClearProperties</code> to clear custom properties before finishing.</p>
+</li>
+<li>
 <p><strong>Orphan file cleanup moved to <code>table/maintenance</code>.</strong> The orphan-cleanup and file-purge API is no longer on <code>table.Table</code>; it now lives in the <code>table/maintenance</code> package as free functions that take the table as their first argument (matching <code>table/compaction</code>). For example, <code>tbl.DeleteOrphanFiles(ctx, ...)</code> becomes <code>maintenance.DeleteOrphanFiles(ctx, tbl, ...)</code>. Because <code>table/maintenance</code> imports <code>table</code> (and not the reverse), this cannot be offered as a deprecation shim on <code>table.Table</code> without an import cycle, so callers must switch to the new package. The following moved from <code>table</code> to <code>table/maintenance</code>:</p>
 <ul>
 <li>Functions (now free functions taking <code>*table.Table</code>): <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, <code>PurgeFiles</code>.</li>
@@ -259,7 +406,34 @@
 <p>Relatedly, the previously unexported <code>isGCEnabled</code> is now <code>table.IsGCEnabled</code>, so the new package can gate destructive operations on the <code>gc.enabled</code> table property.</p>
 </li>
 <li>
+<p><strong>Data-file replacement methods renamed.</strong> Use <code>ReplaceDataFilesByPath</code> for string paths. Use <code>ReplaceDataFiles</code> for prebuilt <code>DataFile</code> values instead of <code>ReplaceDataFilesWithDataFiles</code>.</p>
+</li>
+<li>
 <p><code>maintenance.PurgeFiles</code> (previously <code>Table.PurgeFiles</code>) now calls <code>IO.Remove</code> concurrently, with up to 32 calls in flight, when the filesystem does not implement <code>BulkRemovableIO</code>. Custom IO implementations, including those registered with <code>io.Register</code>, must make <code>Remove</code> safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.</p>
+</li>
+<li>
+<p><strong>Snapshot summaries report deletion vectors separately.</strong> On v3 tables, DVs are counted under <code>added-dvs</code> and <code>removed-dvs</code> instead of <code>added-position-delete-files</code> and <code>removed-position-delete-files</code>. <code>added-files-size</code> and <code>removed-files-size</code> use each DV's <code>content_size_in_bytes</code> instead of its whole Puffin file, so they go down for commits with DVs. <code>total-files-size</code> is updated from these values. Partition summaries, commit reports and OTel metrics change the same way. Existing snapshots are not rewritten.</p>
+</li>
+<li>
+<p><strong>Deletion vectors identify row positions.</strong> New Puffin blobs list <code>_pos</code> field ID <code>2147483645</code> in <code>fields</code>, matching Iceberg Java. Existing files are unchanged.</p>
+</li>
+<li>
+<p><strong>Partition and sort source accessors renamed.</strong> Replace <code>PartitionField.SourceID()</code> and <code>SortField.SourceID()</code> with <code>FirstSourceID()</code>. Their behavior and serialized fields are unchanged.</p>
+</li>
+<li>
+<p><strong>Row-lineage column predicate renamed.</strong> Use <code>iceberg.IsRowLineageColumn</code> instead of <code>iceberg.IsMetadataColumn</code> to identify <code>_row_id</code> and <code>_last_updated_sequence_number</code>. Use <code>iceberg.IsReservedFieldID</code> to check the full reserved metadata field ID range.</p>
+</li>
+<li>
+<p><strong>File writes and directory walks now take an operation context.</strong> Update <code>WriteFileIO</code> and <code>ListableIO</code> implementations and calls to <code>Create</code>, <code>WriteFile</code>, and <code>WalkDir</code> to pass <code>context.Context</code>; cloud writes and listings use it for cancellation.</p>
+</li>
+<li>
+<p><strong>In and NotIn follow SQL semantics for NULL.</strong> A multi-valued <code>NotIn</code>, <code>NOT(In(...))</code> and <code>NOT(NotIn(...))</code> no longer match rows where the column is NULL, consistent with <code>NotEqual</code>. A predicate under NOT on a column missing from an older data file no longer matches every row of that file; those rows match as a stored NULL would. Java's <code>Evaluator</code> still matches NULL for <code>notEq</code> and <code>notIn</code>, see <a href="https://github.com/apache/iceberg/issues/18701">apache/iceberg#18701</a>.</p>
+</li>
+<li>
+<p><strong>Commit rejections now match <code>table.ErrCommitRejected</code>.</strong> SQL, Glue, Hive and Hadoop failures while preparing metadata, plus REST commit responses 400, 401, 403 and 404, leave transactions committable (after a REST 404, the next <code>Commit</code> fails when it reloads the table). Existing <code>errors.Is</code> matches keep working, but SQL, Glue, Hive and Hadoop rejection messages now start with <code>commit rejected: </code>, so code that matches error text may need updating.</p>
+</li>
+<li>
+<p><strong>Float comparisons against literals beyond the float32 range follow IEEE 754.</strong> On a float32 column, <code>x &lt; 1e100</code> no longer returns NaN, <code>+Inf</code> or NULL rows, and <code>NOT(x &gt; 1e100)</code> no longer returns NULL rows. An infinite literal now binds to a float32 infinity, so <code>x = +Inf</code> matches <code>+Inf</code> rows. Java still folds these comparisons to always true or false, see <a href="https://github.com/apache/iceberg/issues/18700">apache/iceberg#18700</a>.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>
