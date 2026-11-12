@@ -255,12 +255,12 @@ catalog:
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
 <tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>. <code>dynamodb</code> is recognized by the CLI but not implemented yet.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>, <code>dynamodb</code>.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for Glue and DynamoDB catalogs. When unset, the AWS SDK default credential chain is used.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. Maps to the <code>sql.driver</code> property. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-dialect</code></td><td>SQL dialect for the SQL catalog (<code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, <code>oracle</code>). Maps to the <code>sql.dialect</code> property. The default CLI binary only ships <code>sqlite</code> via <code>sqliteshim</code>; other dialects need a custom build with their drivers.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST. When enabled, requests are signed with the <code>s3.*</code> credential properties if set (<code>s3.access-key-id</code> / <code>s3.secret-access-key</code> / <code>s3.session-token</code>), otherwise with the AWS default credential chain. The Java-client names (<code>rest.access-key-id</code> / <code>rest.secret-access-key</code> / <code>rest.session-token</code>) are accepted as aliases, resolved per field with the <code>s3.*</code> keys taking precedence.</td></tr>
@@ -304,11 +304,66 @@ that loads a REST catalog with <code>rest.sigv4-enabled=true</code> now fails at
 until the <code>catalog/rest/sigv4</code> backend is blank-imported; the error names the
 import to add.</p>
 </blockquote>
-<h4 id="custom-token-sources-google-biglake"><a class="header" href="#custom-token-sources-google-biglake">Custom token sources (Google BigLake)</a></h4>
+<h4 id="authentication-type"><a class="header" href="#authentication-type">Authentication type</a></h4>
+<p>The <code>rest.auth.type</code> property selects how the client authenticates, as in Iceberg
+Java. It is read only from the properties the client supplies; a server's
+<code>/v1/config</code> defaults and overrides can't change it. An <code>AuthManager</code> passed with
+<code>WithAuthManager</code> takes precedence over it.</p>
+<div class="table-wrapper"><table><thead><tr><th>Value</th><th>Behavior</th></tr></thead><tbody>
+<tr><td>unset or <code>oauth2</code></td><td>Use <code>token</code>, or the client-credentials flow with <code>credential</code>. With neither, send no authorization header.</td></tr>
+<tr><td><code>none</code></td><td>Send no authorization header, even if <code>token</code> or <code>credential</code> is set.</td></tr>
+<tr><td><code>basic</code></td><td>HTTP Basic authentication with <code>rest.auth.basic.username</code> and <code>rest.auth.basic.password</code>, both required. Like <code>rest.auth.type</code>, they are read only from the client's properties.</td></tr>
+<tr><td><code>sigv4</code></td><td>Sign every request with AWS SigV4 and authenticate with the type in <code>rest.auth.sigv4.delegate-auth-type</code> (default <code>oauth2</code>; <code>sigv4</code> is rejected). Requires a blank import of <code>catalog/rest/sigv4</code>. Unlike <code>rest.sigv4-enabled</code>, a server override can't turn this signing off.</td></tr>
+<tr><td><code>google</code></td><td>Google credentials, for catalogs such as BigLake. Requires a blank import of <code>catalog/rest/googleauth</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Other values select an auth manager registered with <code>rest.RegisterAuthManager</code>.
+An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>.</p>
+<p>When SigV4 signs a request that already carries an <code>Authorization</code> header, such
+as the <code>oauth2</code> or <code>basic</code> header of the delegate auth type, the header moves to
+<code>Original-Authorization</code> and is signed with the request, as in Java. This also
+applies to <code>rest.sigv4-enabled</code>.</p>
+<h4 id="google-biglake"><a class="header" href="#google-biglake">Google BigLake</a></h4>
+<p>With <code>rest.auth.type=google</code>, the
+<a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go"><code>catalog/rest/googleauth</code></a>
+backend authenticates with Google credentials, using the same properties as
+Java's <code>GoogleAuthManager</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Property</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>gcp.auth.credentials-path</code></td><td>Path to a credentials JSON file, such as a service account key.</td></tr>
+<tr><td><code>gcp.auth.credentials-json</code></td><td>The same JSON, inline. Setting both is an error.</td></tr>
+<tr><td><code>gcp.auth.scopes</code></td><td>Comma-separated OAuth scopes. Default <code>https://www.googleapis.com/auth/cloud-platform</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Without either credentials property, Application Default Credentials are used.
+Like <code>rest.auth.type</code>, these are read only from the client's properties.</p>
+<p>Token requests don't go through the catalog's HTTP client, so a transport, TLS
+config or proxy set with <code>WithCustomTransport</code>, <code>WithTLSConfig</code> or
+<code>WithTransportFactory</code> doesn't apply to them, as in Java. They use a client with
+the default transport and a 60-second timeout. To use a specific client, put it
+in the context's <code>oauth2.HTTPClient</code> value when loading the catalog, or build
+the token source yourself (for example with <code>googleauth.TokenSource</code>) and pass
+<code>NewOauth2AuthManager(ts)</code> to <code>WithAuthManager</code>. One exception: on Google Cloud
+compute, Application Default Credentials come from the metadata server, which
+the Google library always reaches through its own client.</p>
+<pre><code class="language-go">import (
+	&quot;github.com/apache/iceberg-go&quot;
+	&quot;github.com/apache/iceberg-go/catalog&quot;
+	_ &quot;github.com/apache/iceberg-go/catalog/rest/googleauth&quot;
+)
+
+cat, err := catalog.Load(ctx, &quot;biglake&quot;, iceberg.Properties{
+	&quot;type&quot;:                       &quot;rest&quot;,
+	&quot;uri&quot;:                        &quot;https://biglake.googleapis.com/iceberg/v1/restcatalog&quot;,
+	&quot;warehouse&quot;:                  &quot;gs://lakehouse-public-data&quot;,
+	&quot;rest.auth.type&quot;:             &quot;google&quot;,
+	&quot;header.x-goog-user-project&quot;: &quot;my-project&quot;,
+})
+</code></pre>
+<h4 id="custom-token-sources"><a class="header" href="#custom-token-sources">Custom token sources</a></h4>
 <p><code>WithCredential</code> uses the OAuth2 client-credentials flow against the catalog's
 token endpoint. For other identity providers, wrap any <code>oauth2.TokenSource</code> with
-<code>NewOauth2AuthManager</code> and pass it to <code>WithAuthManager</code>. Google's BigLake Iceberg
-REST catalog, for example, takes Application Default Credentials:</p>
+<code>NewOauth2AuthManager</code> and pass it to <code>WithAuthManager</code>. The Google setup above
+can also be written this way:</p>
 <pre><code class="language-go">ts, err := google.DefaultTokenSource(ctx, &quot;https://www.googleapis.com/auth/cloud-platform&quot;)
 if err != nil {
 	return err
@@ -321,9 +376,9 @@ cat, err := rest.NewCatalog(ctx, &quot;biglake&quot;, &quot;https://biglake.goog
 <p>The manager reuses a token until it expires, then asks the source for a new one.
 That refresh runs on the HTTP client the source was built with. For
 <code>google.DefaultTokenSource</code> that is the client in the context's
-<code>oauth2.HTTPClient</code> value, or <code>http.DefaultClient</code>, which has no timeout.
-Unlike Java's <code>rest.auth.type=google</code>, this is configured in code; iceberg-go
-has no <code>rest.auth.type</code> property.</p>
+<code>oauth2.HTTPClient</code> value, or <code>http.DefaultClient</code>, which has no timeout. With
+<code>rest.auth.type=google</code>, the backend sets a client with a 60-second timeout
+unless the context already carries one.</p>
 <h4 id="metrics-reporting"><a class="header" href="#metrics-reporting">Metrics reporting</a></h4>
 <p>The REST catalog can POST scan and commit metrics to the catalog's
 <code>.../tables/{table}/metrics</code> endpoint. These properties are passed as
@@ -538,7 +593,8 @@ func init() {
 <h3 id="format-and-file-sizing"><a class="header" href="#format-and-file-sizing">Format and file sizing</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>write.format.default</code></td><td><code>parquet</code></td><td>File format used when writing data files. Read in <code>table/writer.go</code> and <code>table/rolling_data_writer.go</code>.</td></tr>
-<tr><td><code>write.target-file-size-bytes</code></td><td>(set by writer)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code> and <code>table/equality_delete_writer.go</code>.</td></tr>
+<tr><td><code>write.target-file-size-bytes</code></td><td><code>536870912</code> (512 MB)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code>.</td></tr>
+<tr><td><code>write.delete.target-file-size-bytes</code></td><td><code>67108864</code> (64 MB)</td><td>Target size for equality-delete and v2 position-delete files where file rolling applies. Read in <code>table/equality_delete_writer.go</code> and <code>table/arrow_utils.go</code>.</td></tr>
 </tbody></table>
 </div>
 <h3 id="scan-reads"><a class="header" href="#scan-reads">Scan reads</a></h3>
@@ -627,20 +683,53 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.page-version</code></td><td><code>2</code></td></tr>
 <tr><td><code>write.parquet.compression-codec</code></td><td><code>zstd</code></td></tr>
 <tr><td><code>write.parquet.compression-level</code></td><td><code>-1</code> (codec default)</td></tr>
+<tr><td><code>write.parquet.compression-codec.column.&lt;name&gt;</code></td><td>Global codec</td></tr>
+<tr><td><code>write.parquet.compression-level.column.&lt;name&gt;</code></td><td>Global level, or the column codec's default if the codecs differ</td></tr>
 <tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
 <tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+<tr><td><code>write.parquet.stats-enabled.column.&lt;name&gt;</code></td><td><code>true</code> (per-column Parquet statistics toggle)</td></tr>
 <tr><td><code>parquet.enable.dictionary</code></td><td><code>true</code> (global dictionary encoding switch; same key as Iceberg Java)</td></tr>
 <tr><td><code>write.parquet.dict-encoding-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched; overrides the global switch)</td></tr>
 <tr><td><code>write.parquet.shred-variants</code></td><td><code>false</code> (opt-in shredding of top-level variant columns)</td></tr>
 <tr><td><code>write.parquet.variant-inference-buffer-size</code></td><td>100 rows (buffered per file to infer the shredding schema)</td></tr>
 </tbody></table>
 </div>
-<p>The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>.</p>
+<p>The bloom filter, statistics, and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>. Statistics settings apply to data files and use Iceberg field names, including nested paths such as <code>items.element</code>. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other metadata may still be recorded.</p>
+<p>Column compression keys use case-sensitive Iceberg leaf paths, such as
+<code>items.element</code> or <code>attributes.value.name</code>. They apply to data files and use
+the global settings for columns without overrides. An explicit column level
+must be an integer valid for its effective codec. Missing fields are ignored.
+Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
+these keys. Arrow does not register legacy <code>lz4</code> or <code>lzo</code> codecs by default;
+<code>lz4_raw</code> is supported.</p>
+<p>Equality-delete and v2 position-delete Parquet writers also support these
+overrides, defined in <code>table/properties.go</code>. Unset overrides inherit the
+corresponding <code>write.parquet.*</code> setting and its default. If the delete codec
+differs from the data codec and no delete level is set, the delete writer uses
+the codec's default level instead of inheriting the data codec's level.</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Overrides</th></tr></thead><tbody>
+<tr><td><code>write.delete.parquet.row-group-size-bytes</code></td><td>Row-group size target</td></tr>
+<tr><td><code>write.delete.parquet.page-size-bytes</code></td><td>Data page size</td></tr>
+<tr><td><code>write.delete.parquet.page-row-limit</code></td><td>Page write batch size</td></tr>
+<tr><td><code>write.delete.parquet.dict-size-bytes</code></td><td>Dictionary page size</td></tr>
+<tr><td><code>write.delete.parquet.page-version</code></td><td>Data page version: <code>v1</code> or <code>v2</code> (<code>1</code> and <code>2</code> also accepted)</td></tr>
+<tr><td><code>write.delete.parquet.compression-codec</code></td><td>Compression codec</td></tr>
+<tr><td><code>write.delete.parquet.compression-level</code></td><td>Compression level</td></tr>
+</tbody></table>
+</div>
+<p>As in Java, data-column Bloom filter and dictionary overrides do not apply to
+delete files. The global <code>parquet.enable.dictionary</code> switch still applies.
+Metrics configuration is independent: equality deletes use the table metrics
+settings, while position deletes always retain full <code>file_path</code> and <code>pos</code> bounds.</p>
 <h3 id="parquet-reader"><a class="header" href="#parquet-reader">Parquet reader</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>read.parquet.batch-size</code></td><td>Arrow record-batch size used by the Parquet reader.</td></tr>
+<tr><td><code>read.parquet.max-compressed-page-size-bytes</code></td><td>Maximum compressed page body. Default: 64 MiB.</td></tr>
+<tr><td><code>read.parquet.max-uncompressed-page-size-bytes</code></td><td>Maximum uncompressed page body. Default: 256 MiB.</td></tr>
 </tbody></table>
 </div>
+<p>The page limits are Go-specific reader settings; Iceberg Java ignores them. Explicit values must be integers from <code>1</code> to <code>2147483647</code>, the largest size representable in a Parquet page header. Table properties apply to scans, deletes, delete-file inspection and maintenance. A scan can override them through <code>table.WithOptions</code> without changing saved metadata. Compressed and uncompressed limits are independent; raising one does not raise the other.</p>
+
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">

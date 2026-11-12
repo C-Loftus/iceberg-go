@@ -250,15 +250,16 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 </code></pre>
 <p>Catalog connection flags are global and apply to every subcommand:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>. <code>dynamodb</code> is recognized but not implemented yet.</td></tr>
-<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive) or SQL DSN</td></tr>
+<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>, <code>dynamodb</code>.</td></tr>
+<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive), SQL DSN, or DynamoDB endpoint override</td></tr>
 <tr><td><code>--warehouse</code></td><td>Warehouse location</td></tr>
+<tr><td><code>--dynamodb-table-name</code></td><td>DynamoDB backing table name (default <code>iceberg</code>)</td></tr>
 <tr><td><code>--credential</code></td><td>Credentials for the catalog</td></tr>
 <tr><td><code>--token</code></td><td>OAuth token (skips OAuth flow)</td></tr>
 <tr><td><code>--scope</code></td><td>OAuth scope (default <code>catalog</code>)</td></tr>
 <tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
 <tr><td><code>--config</code></td><td>Path to a config file</td></tr>
-<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue catalog); overrides <code>aws-profile</code> in the config file</td></tr>
+<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue/DynamoDB catalogs); overrides <code>aws-profile</code> in the config file</td></tr>
 <tr><td><code>--sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
 <tr><td><code>--sql-dialect</code></td><td>SQL dialect for the SQL catalog. The SQL catalog library supports <code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, and <code>oracle</code>, but the default CLI binary only ships the <code>sqlite</code> dialect via <code>sqliteshim</code>. Other dialects need a custom build that blank-imports their <code>database/sql</code> drivers.</td></tr>
 </tbody></table>
@@ -433,6 +434,24 @@ iceberg upgrade my_db.events 2
   --min-snapshots-to-keep 10 \
   my_db.events audit-2026-q2
 </code></pre>
+<h3 id="branch-fast-forward"><a class="header" href="#branch-fast-forward"><code>branch fast-forward</code></a></h3>
+<pre><code class="language-shell">iceberg branch fast-forward my_db.events main audit
+</code></pre>
+<p>Advance the target branch to the source branch or tag. The command checks
+ancestry and fails if histories have diverged. If the target does not exist,
+it creates a branch at the source snapshot. The confirmation prompt shows the
+previous and next snapshot IDs, or explicitly says a new branch will be created.
+Use <code>--yes</code> to skip confirmation.</p>
+<h3 id="branch-replace"><a class="header" href="#branch-replace"><code>branch replace</code></a></h3>
+<pre><code class="language-shell">iceberg branch replace my_db.events main 7234981023498
+</code></pre>
+<p>Move an existing branch to any known snapshot, without an ancestry check.
+This can discard the branch's current history from the branch head. The prompt
+shows both the previous and next snapshot IDs. Retention settings are preserved.
+Use <code>--yes</code> to skip confirmation.</p>
+<p>For both commands, REST catalogs using <code>snapshot-loading-mode=refs</code> may omit
+historical snapshots needed for ancestry checks or replacement. Use
+<code>snapshot-loading-mode=all</code> for these operations.</p>
 <h3 id="tag-create"><a class="header" href="#tag-create"><code>tag create</code></a></h3>
 <pre><code class="language-shell">iceberg tag create my_db.events pre-migration-v4
 </code></pre>

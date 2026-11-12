@@ -249,7 +249,28 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>SigV4 keeps the token or credential as <code>Original-Authorization</code>.</strong> With <code>rest.sigv4-enabled=true</code> (or <code>rest.auth.type=sigv4</code>) and a <code>token</code> or <code>credential</code>, requests used to be signed with the token silently dropped, because the SigV4 signature replaced the <code>Authorization</code> header. They now carry it as <code>Original-Authorization</code>, included in the signed headers, as Iceberg Java does. A server behind SigV4 that ignores the header is unaffected.</p>
+</li>
+<li>
+<p><strong>Float and double literal comparators use Iceberg ordering.</strong> <code>TypedLiteral.Comparator()</code> now orders <code>-0.0</code> before <code>+0.0</code> and NaN after all other values; NaN compares equal to NaN. Callers that use these public comparators may see a different order or equality result.</p>
+</li>
+<li>
+<p><strong>Table creation rejects duplicate field IDs.</strong> <code>NewMetadata</code>, and <code>CreateTable</code> on catalogs that build metadata through it (not REST), now return <code>ErrInvalidSchema</code> when two fields in the schema share an ID, including unset <code>0</code> or <code>-1</code> IDs, even for unpartitioned, unsorted tables. Before, the partition spec or sort order could bind to the wrong column. Callers should assign unique IDs (or let the schema be built with fresh IDs). This matches Java, whose <code>Schema</code> constructor rejects duplicate IDs.</p>
+</li>
+<li>
+<p><strong>Sort order replacements reuse orders staged earlier in the same transaction.</strong> If a transaction replaces order A with B and then returns to A, A becomes the default again instead of B. The final update reuses A's ID instead of adding another definition. Reuse of orders from earlier commits was already supported.</p>
+</li>
+<li>
+<p><strong>Case-insensitive field binding rejects only ambiguous names.</strong> <code>Reference.Bind</code> and <code>Schema.Select</code> return <code>ErrInvalidSchema</code> when the requested case-insensitive name matches different field IDs, and the error includes both names. Unrelated names remain available to scans, writes, and schema, partition, and sort order updates.</p>
+</li>
+<li>
+<p><strong>Delete files now have a separate 64 MiB target.</strong> Equality-delete and v2 position-delete files previously used <code>write.target-file-size-bytes</code> (512 MiB by default, or the table's override) as their file-size target. They now use <code>write.delete.target-file-size-bytes</code>, which defaults to 64 MiB. After upgrading, tables may produce more, smaller delete files unless this new property is set. To preserve the previous delete-file size target, set <code>write.delete.target-file-size-bytes</code> to the table's former effective <code>write.target-file-size-bytes</code> value (<code>536870912</code> when the data-file target was unset). The data-file target itself is unchanged.</p>
+</li>
+<li>
 <p><strong>Schema reads now reject invalid identifier fields.</strong> Table and view metadata with <code>identifier-field-ids</code> referring to an optional, float/double, missing, non-primitive, or improperly nested field now fails to load with <code>invalid schema</code> (for example, <code>invalid schema: identifier field &quot;foo&quot; must be required</code> or <code>invalid schema: identifier field &quot;foo&quot; cannot be float or double</code>). Older iceberg-go releases could load such metadata, but Java Iceberg already rejects it. To recover an affected table, back up its metadata and use an atomic catalog metadata repair to remove the invalid identifier IDs or replace them with IDs of existing, required, non-floating primitive fields nested only in required structs. Do not edit the currently referenced metadata file in place. Repeated identifier IDs are deduplicated on read.</p>
+</li>
+<li>
+<p><strong>Schema JSON defaults preserve integer precision.</strong> <code>long</code> defaults now decode as <code>int64</code> instead of <code>float64</code>; non-integral, non-numeric, or out-of-range values now fail to parse. Numeric literals inside object and list defaults decode as <code>json.Number</code> rather than <code>float64</code>.</p>
 </li>
 <li>
 <p><strong><code>StructType.Fields()</code> returns a copy.</strong> Changing the returned slice no longer changes the struct, matching <code>ListType.Fields()</code> and <code>MapType.Fields()</code>. Build a new type with <code>NewStructType</code> instead. <code>NumFields()</code> and <code>Field(i)</code> read fields without copying, and <code>NewListType</code> and <code>NewMapType</code> are the constructors for the other nested types. The exported fields are unchanged for now; they become unexported before v1.0.0 (see <a href="https://github.com/apache/iceberg-go/issues/2062">#2062</a>).</p>
@@ -276,7 +297,13 @@
 <p><strong>Partitioned data files follow the table's location provider.</strong> With <code>write.object-storage.enabled=true</code> and the default <code>write.object-storage.partitioned-paths=true</code>, new partitioned files land under <code>data/&lt;hash&gt;/&lt;partition&gt;/</code> instead of <code>data/&lt;partition&gt;/&lt;hash&gt;/</code>, which can affect prefix-based lifecycle rules and bucket policies. <code>write.object-storage.partitioned-paths=false</code> and <code>write.data.path</code> now apply to partitioned writes. Partitioned paths also no longer percent-encode the table location: <code>s3://bucket/my table</code> stays literal instead of becoming <code>my%20table</code>, as for unpartitioned writes. Existing files stay where they are.</p>
 </li>
 <li>
-<p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST, Hive, and SQL), while REST also implements <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
+<p><strong>External object-store data paths include table context.</strong> For object-storage tables whose <code>write.data.path</code> is outside the table location, new data files now use <code>&lt;hash&gt;/&lt;db&gt;/&lt;table&gt;/...</code> after the shared storage prefix. This applies whether <code>write.object-storage.partitioned-paths</code> is <code>true</code> or <code>false</code>. The new prefixes may affect prefix-based lifecycle rules and bucket policies. Existing data files do not move.</p>
+</li>
+<li>
+<p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST, Hive, and SQL), while REST also implements <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. REST and SQL implement <code>RenamableViewCatalog</code> for <code>RenameView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
+</li>
+<li>
+<p><strong>Rename IO methods take a context.</strong> <code>RenameIO.Rename</code> and <code>RenameNoReplaceIO.RenameNoReplace</code> now take <code>context.Context</code> first, so custom implementations and callers must update.</p>
 </li>
 <li>
 <p><strong><code>ReplaceFilesWithDeleteFiles</code> removed.</strong> For delete-file replacements, use <code>tx.NewRewrite(snapshotProps)</code>, call <code>DeleteFile</code> for each source file and <code>AddDeleteFileWithDataSequenceNumber</code> for each replacement, then commit the builder. Rewrites record a <code>replace</code> snapshot instead of <code>overwrite</code>. The five-argument <code>ReplaceFiles</code> API is unchanged and remains available for compaction and delete-file removals.</p>
@@ -391,6 +418,9 @@
 </li>
 <li>
 <p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> is removed. Replace <code>cat.(catalog.Closer)</code> checks with <code>defer cat.Close()</code>; <code>catalog.Catalog</code> already implements <code>io.Closer</code>, so no type assertion is needed.</p>
+</li>
+<li>
+<p><strong><code>table.ErrDataFilesMissing</code> no longer matches <code>table.ErrCommitFailed</code>.</strong> An operation that adds delete files referencing data files that are not live, for example because a concurrent commit removed them, fails with <code>ErrDataFilesMissing</code>. The error is now terminal, like <code>table.ErrCommitDiverged</code>, matching Java's <code>ValidationException</code>, so code that retries when <code>errors.Is(err, table.ErrCommitFailed)</code> no longer retries it. When <code>Transaction.Commit</code> returns it, the error also matches <code>table.ErrTransactionUnusable</code>. Rebuild the delete against the current table instead.</p>
 </li>
 <li>
 <p><strong>Puffin writer property setter renamed.</strong> <code>puffin.Writer.AddProperties</code> is now <code>puffin.Writer.SetProperties</code>. Repeated calls still merge keys; use <code>ClearProperties</code> to clear custom properties before finishing.</p>

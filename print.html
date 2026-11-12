@@ -545,12 +545,12 @@ catalog:
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
 <tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>. <code>dynamodb</code> is recognized by the CLI but not implemented yet.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>, <code>dynamodb</code>.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for Glue and DynamoDB catalogs. When unset, the AWS SDK default credential chain is used.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. Maps to the <code>sql.driver</code> property. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-dialect</code></td><td>SQL dialect for the SQL catalog (<code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, <code>oracle</code>). Maps to the <code>sql.dialect</code> property. The default CLI binary only ships <code>sqlite</code> via <code>sqliteshim</code>; other dialects need a custom build with their drivers.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST. When enabled, requests are signed with the <code>s3.*</code> credential properties if set (<code>s3.access-key-id</code> / <code>s3.secret-access-key</code> / <code>s3.session-token</code>), otherwise with the AWS default credential chain. The Java-client names (<code>rest.access-key-id</code> / <code>rest.secret-access-key</code> / <code>rest.session-token</code>) are accepted as aliases, resolved per field with the <code>s3.*</code> keys taking precedence.</td></tr>
@@ -594,11 +594,66 @@ that loads a REST catalog with <code>rest.sigv4-enabled=true</code> now fails at
 until the <code>catalog/rest/sigv4</code> backend is blank-imported; the error names the
 import to add.</p>
 </blockquote>
-<h4 id="custom-token-sources-google-biglake"><a class="header" href="#custom-token-sources-google-biglake">Custom token sources (Google BigLake)</a></h4>
+<h4 id="authentication-type"><a class="header" href="#authentication-type">Authentication type</a></h4>
+<p>The <code>rest.auth.type</code> property selects how the client authenticates, as in Iceberg
+Java. It is read only from the properties the client supplies; a server's
+<code>/v1/config</code> defaults and overrides can't change it. An <code>AuthManager</code> passed with
+<code>WithAuthManager</code> takes precedence over it.</p>
+<div class="table-wrapper"><table><thead><tr><th>Value</th><th>Behavior</th></tr></thead><tbody>
+<tr><td>unset or <code>oauth2</code></td><td>Use <code>token</code>, or the client-credentials flow with <code>credential</code>. With neither, send no authorization header.</td></tr>
+<tr><td><code>none</code></td><td>Send no authorization header, even if <code>token</code> or <code>credential</code> is set.</td></tr>
+<tr><td><code>basic</code></td><td>HTTP Basic authentication with <code>rest.auth.basic.username</code> and <code>rest.auth.basic.password</code>, both required. Like <code>rest.auth.type</code>, they are read only from the client's properties.</td></tr>
+<tr><td><code>sigv4</code></td><td>Sign every request with AWS SigV4 and authenticate with the type in <code>rest.auth.sigv4.delegate-auth-type</code> (default <code>oauth2</code>; <code>sigv4</code> is rejected). Requires a blank import of <code>catalog/rest/sigv4</code>. Unlike <code>rest.sigv4-enabled</code>, a server override can't turn this signing off.</td></tr>
+<tr><td><code>google</code></td><td>Google credentials, for catalogs such as BigLake. Requires a blank import of <code>catalog/rest/googleauth</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Other values select an auth manager registered with <code>rest.RegisterAuthManager</code>.
+An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>.</p>
+<p>When SigV4 signs a request that already carries an <code>Authorization</code> header, such
+as the <code>oauth2</code> or <code>basic</code> header of the delegate auth type, the header moves to
+<code>Original-Authorization</code> and is signed with the request, as in Java. This also
+applies to <code>rest.sigv4-enabled</code>.</p>
+<h4 id="google-biglake"><a class="header" href="#google-biglake">Google BigLake</a></h4>
+<p>With <code>rest.auth.type=google</code>, the
+<a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go"><code>catalog/rest/googleauth</code></a>
+backend authenticates with Google credentials, using the same properties as
+Java's <code>GoogleAuthManager</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Property</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>gcp.auth.credentials-path</code></td><td>Path to a credentials JSON file, such as a service account key.</td></tr>
+<tr><td><code>gcp.auth.credentials-json</code></td><td>The same JSON, inline. Setting both is an error.</td></tr>
+<tr><td><code>gcp.auth.scopes</code></td><td>Comma-separated OAuth scopes. Default <code>https://www.googleapis.com/auth/cloud-platform</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Without either credentials property, Application Default Credentials are used.
+Like <code>rest.auth.type</code>, these are read only from the client's properties.</p>
+<p>Token requests don't go through the catalog's HTTP client, so a transport, TLS
+config or proxy set with <code>WithCustomTransport</code>, <code>WithTLSConfig</code> or
+<code>WithTransportFactory</code> doesn't apply to them, as in Java. They use a client with
+the default transport and a 60-second timeout. To use a specific client, put it
+in the context's <code>oauth2.HTTPClient</code> value when loading the catalog, or build
+the token source yourself (for example with <code>googleauth.TokenSource</code>) and pass
+<code>NewOauth2AuthManager(ts)</code> to <code>WithAuthManager</code>. One exception: on Google Cloud
+compute, Application Default Credentials come from the metadata server, which
+the Google library always reaches through its own client.</p>
+<pre><code class="language-go">import (
+	&quot;github.com/apache/iceberg-go&quot;
+	&quot;github.com/apache/iceberg-go/catalog&quot;
+	_ &quot;github.com/apache/iceberg-go/catalog/rest/googleauth&quot;
+)
+
+cat, err := catalog.Load(ctx, &quot;biglake&quot;, iceberg.Properties{
+	&quot;type&quot;:                       &quot;rest&quot;,
+	&quot;uri&quot;:                        &quot;https://biglake.googleapis.com/iceberg/v1/restcatalog&quot;,
+	&quot;warehouse&quot;:                  &quot;gs://lakehouse-public-data&quot;,
+	&quot;rest.auth.type&quot;:             &quot;google&quot;,
+	&quot;header.x-goog-user-project&quot;: &quot;my-project&quot;,
+})
+</code></pre>
+<h4 id="custom-token-sources"><a class="header" href="#custom-token-sources">Custom token sources</a></h4>
 <p><code>WithCredential</code> uses the OAuth2 client-credentials flow against the catalog's
 token endpoint. For other identity providers, wrap any <code>oauth2.TokenSource</code> with
-<code>NewOauth2AuthManager</code> and pass it to <code>WithAuthManager</code>. Google's BigLake Iceberg
-REST catalog, for example, takes Application Default Credentials:</p>
+<code>NewOauth2AuthManager</code> and pass it to <code>WithAuthManager</code>. The Google setup above
+can also be written this way:</p>
 <pre><code class="language-go">ts, err := google.DefaultTokenSource(ctx, &quot;https://www.googleapis.com/auth/cloud-platform&quot;)
 if err != nil {
 	return err
@@ -611,9 +666,9 @@ cat, err := rest.NewCatalog(ctx, &quot;biglake&quot;, &quot;https://biglake.goog
 <p>The manager reuses a token until it expires, then asks the source for a new one.
 That refresh runs on the HTTP client the source was built with. For
 <code>google.DefaultTokenSource</code> that is the client in the context's
-<code>oauth2.HTTPClient</code> value, or <code>http.DefaultClient</code>, which has no timeout.
-Unlike Java's <code>rest.auth.type=google</code>, this is configured in code; iceberg-go
-has no <code>rest.auth.type</code> property.</p>
+<code>oauth2.HTTPClient</code> value, or <code>http.DefaultClient</code>, which has no timeout. With
+<code>rest.auth.type=google</code>, the backend sets a client with a 60-second timeout
+unless the context already carries one.</p>
 <h4 id="metrics-reporting"><a class="header" href="#metrics-reporting">Metrics reporting</a></h4>
 <p>The REST catalog can POST scan and commit metrics to the catalog's
 <code>.../tables/{table}/metrics</code> endpoint. These properties are passed as
@@ -828,7 +883,8 @@ func init() {
 <h3 id="format-and-file-sizing"><a class="header" href="#format-and-file-sizing">Format and file sizing</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>write.format.default</code></td><td><code>parquet</code></td><td>File format used when writing data files. Read in <code>table/writer.go</code> and <code>table/rolling_data_writer.go</code>.</td></tr>
-<tr><td><code>write.target-file-size-bytes</code></td><td>(set by writer)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code> and <code>table/equality_delete_writer.go</code>.</td></tr>
+<tr><td><code>write.target-file-size-bytes</code></td><td><code>536870912</code> (512 MB)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code>.</td></tr>
+<tr><td><code>write.delete.target-file-size-bytes</code></td><td><code>67108864</code> (64 MB)</td><td>Target size for equality-delete and v2 position-delete files where file rolling applies. Read in <code>table/equality_delete_writer.go</code> and <code>table/arrow_utils.go</code>.</td></tr>
 </tbody></table>
 </div>
 <h3 id="scan-reads"><a class="header" href="#scan-reads">Scan reads</a></h3>
@@ -917,20 +973,53 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.page-version</code></td><td><code>2</code></td></tr>
 <tr><td><code>write.parquet.compression-codec</code></td><td><code>zstd</code></td></tr>
 <tr><td><code>write.parquet.compression-level</code></td><td><code>-1</code> (codec default)</td></tr>
+<tr><td><code>write.parquet.compression-codec.column.&lt;name&gt;</code></td><td>Global codec</td></tr>
+<tr><td><code>write.parquet.compression-level.column.&lt;name&gt;</code></td><td>Global level, or the column codec's default if the codecs differ</td></tr>
 <tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
 <tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+<tr><td><code>write.parquet.stats-enabled.column.&lt;name&gt;</code></td><td><code>true</code> (per-column Parquet statistics toggle)</td></tr>
 <tr><td><code>parquet.enable.dictionary</code></td><td><code>true</code> (global dictionary encoding switch; same key as Iceberg Java)</td></tr>
 <tr><td><code>write.parquet.dict-encoding-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched; overrides the global switch)</td></tr>
 <tr><td><code>write.parquet.shred-variants</code></td><td><code>false</code> (opt-in shredding of top-level variant columns)</td></tr>
 <tr><td><code>write.parquet.variant-inference-buffer-size</code></td><td>100 rows (buffered per file to infer the shredding schema)</td></tr>
 </tbody></table>
 </div>
-<p>The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>.</p>
+<p>The bloom filter, statistics, and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>. Statistics settings apply to data files and use Iceberg field names, including nested paths such as <code>items.element</code>. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other metadata may still be recorded.</p>
+<p>Column compression keys use case-sensitive Iceberg leaf paths, such as
+<code>items.element</code> or <code>attributes.value.name</code>. They apply to data files and use
+the global settings for columns without overrides. An explicit column level
+must be an integer valid for its effective codec. Missing fields are ignored.
+Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
+these keys. Arrow does not register legacy <code>lz4</code> or <code>lzo</code> codecs by default;
+<code>lz4_raw</code> is supported.</p>
+<p>Equality-delete and v2 position-delete Parquet writers also support these
+overrides, defined in <code>table/properties.go</code>. Unset overrides inherit the
+corresponding <code>write.parquet.*</code> setting and its default. If the delete codec
+differs from the data codec and no delete level is set, the delete writer uses
+the codec's default level instead of inheriting the data codec's level.</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Overrides</th></tr></thead><tbody>
+<tr><td><code>write.delete.parquet.row-group-size-bytes</code></td><td>Row-group size target</td></tr>
+<tr><td><code>write.delete.parquet.page-size-bytes</code></td><td>Data page size</td></tr>
+<tr><td><code>write.delete.parquet.page-row-limit</code></td><td>Page write batch size</td></tr>
+<tr><td><code>write.delete.parquet.dict-size-bytes</code></td><td>Dictionary page size</td></tr>
+<tr><td><code>write.delete.parquet.page-version</code></td><td>Data page version: <code>v1</code> or <code>v2</code> (<code>1</code> and <code>2</code> also accepted)</td></tr>
+<tr><td><code>write.delete.parquet.compression-codec</code></td><td>Compression codec</td></tr>
+<tr><td><code>write.delete.parquet.compression-level</code></td><td>Compression level</td></tr>
+</tbody></table>
+</div>
+<p>As in Java, data-column Bloom filter and dictionary overrides do not apply to
+delete files. The global <code>parquet.enable.dictionary</code> switch still applies.
+Metrics configuration is independent: equality deletes use the table metrics
+settings, while position deletes always retain full <code>file_path</code> and <code>pos</code> bounds.</p>
 <h3 id="parquet-reader"><a class="header" href="#parquet-reader">Parquet reader</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>read.parquet.batch-size</code></td><td>Arrow record-batch size used by the Parquet reader.</td></tr>
+<tr><td><code>read.parquet.max-compressed-page-size-bytes</code></td><td>Maximum compressed page body. Default: 64 MiB.</td></tr>
+<tr><td><code>read.parquet.max-uncompressed-page-size-bytes</code></td><td>Maximum uncompressed page body. Default: 256 MiB.</td></tr>
 </tbody></table>
-</div><div style="break-before: page; page-break-before: always;"></div><!--
+</div>
+<p>The page limits are Go-specific reader settings; Iceberg Java ignores them. Explicit values must be integers from <code>1</code> to <code>2147483647</code>, the largest size representable in a Parquet page header. Table properties apply to scans, deletes, delete-file inspection and maintenance. A scan can override them through <code>table.WithOptions</code> without changing saved metadata. Compressed and uncompressed limits are independent; raising one does not raise the other.</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
   ~ Licensed to the Apache Software Foundation (ASF) under one
   ~ or more contributor license agreements.  See the NOTICE file
   ~ distributed with this work for additional information
@@ -966,15 +1055,16 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 </code></pre>
 <p>Catalog connection flags are global and apply to every subcommand:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>. <code>dynamodb</code> is recognized but not implemented yet.</td></tr>
-<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive) or SQL DSN</td></tr>
+<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>, <code>dynamodb</code>.</td></tr>
+<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive), SQL DSN, or DynamoDB endpoint override</td></tr>
 <tr><td><code>--warehouse</code></td><td>Warehouse location</td></tr>
+<tr><td><code>--dynamodb-table-name</code></td><td>DynamoDB backing table name (default <code>iceberg</code>)</td></tr>
 <tr><td><code>--credential</code></td><td>Credentials for the catalog</td></tr>
 <tr><td><code>--token</code></td><td>OAuth token (skips OAuth flow)</td></tr>
 <tr><td><code>--scope</code></td><td>OAuth scope (default <code>catalog</code>)</td></tr>
 <tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
 <tr><td><code>--config</code></td><td>Path to a config file</td></tr>
-<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue catalog); overrides <code>aws-profile</code> in the config file</td></tr>
+<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue/DynamoDB catalogs); overrides <code>aws-profile</code> in the config file</td></tr>
 <tr><td><code>--sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
 <tr><td><code>--sql-dialect</code></td><td>SQL dialect for the SQL catalog. The SQL catalog library supports <code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, and <code>oracle</code>, but the default CLI binary only ships the <code>sqlite</code> dialect via <code>sqliteshim</code>. Other dialects need a custom build that blank-imports their <code>database/sql</code> drivers.</td></tr>
 </tbody></table>
@@ -1149,6 +1239,24 @@ iceberg upgrade my_db.events 2
   --min-snapshots-to-keep 10 \
   my_db.events audit-2026-q2
 </code></pre>
+<h3 id="branch-fast-forward"><a class="header" href="#branch-fast-forward"><code>branch fast-forward</code></a></h3>
+<pre><code class="language-shell">iceberg branch fast-forward my_db.events main audit
+</code></pre>
+<p>Advance the target branch to the source branch or tag. The command checks
+ancestry and fails if histories have diverged. If the target does not exist,
+it creates a branch at the source snapshot. The confirmation prompt shows the
+previous and next snapshot IDs, or explicitly says a new branch will be created.
+Use <code>--yes</code> to skip confirmation.</p>
+<h3 id="branch-replace"><a class="header" href="#branch-replace"><code>branch replace</code></a></h3>
+<pre><code class="language-shell">iceberg branch replace my_db.events main 7234981023498
+</code></pre>
+<p>Move an existing branch to any known snapshot, without an ancestry check.
+This can discard the branch's current history from the branch head. The prompt
+shows both the previous and next snapshot IDs. Retention settings are preserved.
+Use <code>--yes</code> to skip confirmation.</p>
+<p>For both commands, REST catalogs using <code>snapshot-loading-mode=refs</code> may omit
+historical snapshots needed for ancestry checks or replacement. Use
+<code>snapshot-loading-mode=all</code> for these operations.</p>
 <h3 id="tag-create"><a class="header" href="#tag-create"><code>tag create</code></a></h3>
 <pre><code class="language-shell">iceberg tag create my_db.events pre-migration-v4
 </code></pre>
@@ -1445,6 +1553,18 @@ arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 <li><code>_commit_snapshot_id</code> — snapshot ID that committed the change</li>
 </ul>
 <p>Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. <code>UPDATE</code> rows are not produced. Delete-file handling is iceberg-go behavior.</p>
+<p>Use <code>ToNormalizedArrowRecords</code> to remove matching DELETE/INSERT occurrences of unchanged rows within each snapshot. Set <code>ComputeUpdates</code> to label remaining rows with the same identifier as <code>UPDATE_BEFORE</code> and <code>UPDATE_AFTER</code>:</p>
+<pre><code class="language-go">schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields(&quot;id&quot;, &quot;name&quot;),
+).FromSnapshotExclusive(startSnapshotID).ToNormalizedArrowRecords(ctx,
+    table.ChangelogNormalizationOptions{
+        ComputeUpdates:   true,
+        IdentifierFields: []string{&quot;id&quot;},
+    })
+</code></pre>
+<p>The zero options value only removes carryovers. Update images use <code>IdentifierFields</code>, or the effective schema's identifier fields when the list is empty. Explicit identifiers may be nullable primitive columns, including paths through structs, and follow the scan's case sensitivity. After removing carryovers, an identifier must have at most one DELETE and one INSERT per snapshot. Duplicate identifiers return an error instead of selecting an ambiguous update image.</p>
+<p>Normalization compares complete rows before applying row filters, projection, and the output limit. Row-lineage columns do not affect matching. Variant values are compared by their encoded metadata/value bytes, with physical NULL distinct from an encoded Variant null. Changes from different snapshots are kept separate. Output follows snapshot and source-task order, with each UPDATE_AFTER immediately following its UPDATE_BEFORE. A batch boundary or row limit may split the pair. Callers release each returned batch.</p>
+<p>The reader buffers one snapshot at a time. <code>MaxBufferedBytes</code> defaults to 64 MiB of retained Arrow buffers and encoded matching keys, and <code>MaxBufferedRows</code> defaults to 1,000,000 input rows per snapshot. Exceeding either limit returns <code>ErrChangelogBufferLimit</code> through the iterator before emitting that snapshot. Decoding, temporary key encoding, output batches, and per-row indexes need additional memory. Temporary keys are individually capped at <code>MaxBufferedBytes</code>. <code>WithArrowBatchSize</code> also caps output batch rows; the default output batch size is 4096.</p>
 <h2 id="writing-data"><a class="header" href="#writing-data">Writing data</a></h2>
 <p>The shortcut methods on <code>Table</code> open a transaction, perform the write, and commit. Use <code>NewTransaction</code> directly when you need to combine multiple operations.</p>
 <h3 id="append"><a class="header" href="#append">Append</a></h3>
@@ -1604,6 +1724,26 @@ if err := us.Commit(); err != nil { /* ... */ }
 </code></pre>
 <p><code>AddField</code> chains; <code>AddIdentity(sourceCol)</code> is a shortcut for an identity transform; <code>RenameField(name, newName)</code> renames an existing partition field.</p>
 <p>Available transforms (root <code>iceberg</code> package): <code>IdentityTransform{}</code>, <code>YearTransform{}</code>, <code>MonthTransform{}</code>, <code>DayTransform{}</code>, <code>HourTransform{}</code>, <code>BucketTransform{NumBuckets: N}</code>, <code>TruncateTransform{Width: W}</code>.</p>
+<h3 id="sort-order-evolution"><a class="header" href="#sort-order-evolution">Sort order evolution</a></h3>
+<p>Use the transaction builder to replace the full default sort order. It binds column names against the transaction's staged schema. An empty builder resets the order to unsorted:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+builder := txn.NewReplaceSortOrder(true).
+    Asc(&quot;event_time&quot;, table.NullsLast).
+    AddField(&quot;user_id&quot;, iceberg.BucketTransform{NumBuckets: 16}, table.SortASC, table.NullsFirst)
+if err := builder.Commit(); err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>Call <code>Transaction.ReplaceSortOrder</code> directly when you already have a <code>table.SortOrder</code>, such as one built from field IDs:</p>
+<pre><code class="language-go">order, err := table.NewSortOrder(1, []table.SortField{{
+    SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
+    Direction: table.SortASC, NullOrder: table.NullsFirst,
+}})
+if err != nil { /* ... */ }
+if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
+</code></pre>
+<p>Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.</p>
+<p>The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.</p>
 <h2 id="snapshots-and-refs"><a class="header" href="#snapshots-and-refs">Snapshots and refs</a></h2>
 <h3 id="inspecting"><a class="header" href="#inspecting">Inspecting</a></h3>
 <pre><code class="language-go">if snap := tbl.CurrentSnapshot(); snap != nil {
@@ -1656,6 +1796,37 @@ reqs := []table.Requirement{
 _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update})
 </code></pre>
 <p>Constants <code>table.MainBranch</code>, <code>table.BranchRef</code>, <code>table.TagRef</code> live in <a href="https://github.com/apache/iceberg-go/blob/main/table/refs.go"><code>table/refs.go</code></a>. A higher-level builder is on the roadmap.</p>
+<h3 id="branch-promotion-and-replacement"><a class="header" href="#branch-promotion-and-replacement">Branch promotion and replacement</a></h3>
+<p>Use a transaction to advance a branch to another branch or tag, or to move it
+to an existing snapshot. Fast-forward checks that the target's current snapshot
+is an ancestor of the source. It creates the target when missing, while
+<code>ReplaceBranch</code> requires an existing target branch.</p>
+<pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;main&quot;)
+if err != nil { /* ... */ }
+if err := txn.FastForwardBranch(&quot;main&quot;, &quot;audit&quot;); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+
+// Without ancestry checks (can move a branch backwards or across histories):
+txn, err = updated.NewTransactionOnBranch(&quot;main&quot;)
+if err != nil { /* ... */ }
+err = txn.ReplaceBranch(&quot;main&quot;, snapshotID)
+// Or use ReplaceBranchFromRef(&quot;main&quot;, &quot;audit&quot;), which can create a missing target.
+</code></pre>
+<p>For a non-main target, call <code>tbl.NewTransactionOnBranch(target)</code> rather than
+<code>tbl.NewTransaction()</code>. The latter uses <code>main</code> as its commit branch, so a
+concurrent append to <code>main</code> can reject an otherwise independent promotion.</p>
+<p>Existing branch retention settings are preserved. Both the target and source
+snapshot IDs are pinned when promoting from a ref, and the target is pinned
+when replacing by ID. If the source snapshot was staged in the same transaction,
+the commit branch is pinned too, preventing retry from changing its ancestry.
+A pinned ref that moves prevents the normal retry of a co-staged append. A retention-only change with the same snapshot ID cannot
+be detected by snapshot-ID requirements in any catalog. REST catalogs also
+cannot detect ref type changes with the same ID.</p>
+<p>Fast-forward needs the complete snapshot ancestry. REST catalogs using
+<code>snapshot-loading-mode=refs</code> can omit intermediate ancestors, causing valid
+fast-forwards to fail. Load with <code>snapshot-loading-mode=all</code> instead.
+Replacing by snapshot ID can also fail if the requested historical snapshot
+was omitted. See <a href="./concurrent-writes.html">Concurrent Writes</a>.</p>
 <h3 id="expiration-and-rollback"><a class="header" href="#expiration-and-rollback">Expiration and rollback</a></h3>
 <pre><code class="language-go">// Expire snapshots older than the table's retention properties
 err := txn.ExpireSnapshots(/* options */)
@@ -2154,6 +2325,11 @@ state. A failed validation surfaces as one of:</p>
 retried after refreshing (see below).</li>
 <li><code>table.ErrCommitDiverged</code> — terminal. The base snapshot is no longer on the
 branch at all, so a retry cannot reconcile the change.</li>
+<li><code>table.ErrDataFilesMissing</code> — terminal. Data files that the operation
+references, such as the target of a position delete or deletion vector, are
+not live, so retrying the same delete cannot succeed. Rebuild the delete
+against the current table. When <code>Transaction.Commit</code> returns it, the error
+also matches <code>ErrTransactionUnusable</code>.</li>
 <li><code>table.ErrTransactionUnusable</code> — this transaction can't be committed again.
 If the error also matches <code>ErrCommitFailed</code>, retry in a new transaction from a
 reloaded table.</li>
@@ -2206,8 +2382,12 @@ source snapshot and does not depend on main.</p>
 <p>Each replayed snapshot from a staged write gets the current timestamp, or one
 millisecond after its parent if that is later. Its timestamp reflects the
 attempt that commits it, not staging time.</p>
-<p><code>RollbackToSnapshot</code> and <code>AssertRefSnapshotID</code> pin their refs. If a pinned ref
-moved, the commit fails with <code>ErrCommitFailed</code> instead of retrying.
+<p><code>RollbackToSnapshot</code>, <code>AssertRefSnapshotID</code>, <code>FastForwardBranch</code>,
+<code>ReplaceBranchFromRef</code>, and <code>ReplaceBranch</code> pin the refs they guard.
+Promoting from a ref pins both the source and target. If the source points to
+a snapshot staged in the same transaction, promotion also pins the commit
+branch, preventing retry from rebuilding that source on a different history.
+If a pinned ref moves, the commit fails instead of rebasing a co-staged append.
 <code>ExpireSnapshots</code> does not pin refs. Retries replan it as described in
 <a href="concurrent-writes.html#snapshot-expiration">Snapshot expiration</a>.</p>
 <p><code>Commit</code> retries a conflict up to 4 times by default (<code>commit.retry.num-retries</code>
@@ -2228,6 +2408,9 @@ change, as <code>ErrCommitFailed</code>, so the retry loop engages on all of the
 commit on another branch that takes the staged snapshot's sequence number or
 first-row-id is a conflict too, and the retry renumbers the snapshot.</p>
 </blockquote>
+<p>Snapshot-ID assertions cannot detect concurrent retention-only edits.
+REST catalogs also cannot detect a ref type change that leaves its snapshot ID
+unchanged. Avoid editing ref retention concurrently with branch promotion.</p>
 <p>Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including the schema, spec, sort order, and pinned
 refs, must still hold. Otherwise, the commit fails without another attempt and
@@ -2852,7 +3035,28 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>SigV4 keeps the token or credential as <code>Original-Authorization</code>.</strong> With <code>rest.sigv4-enabled=true</code> (or <code>rest.auth.type=sigv4</code>) and a <code>token</code> or <code>credential</code>, requests used to be signed with the token silently dropped, because the SigV4 signature replaced the <code>Authorization</code> header. They now carry it as <code>Original-Authorization</code>, included in the signed headers, as Iceberg Java does. A server behind SigV4 that ignores the header is unaffected.</p>
+</li>
+<li>
+<p><strong>Float and double literal comparators use Iceberg ordering.</strong> <code>TypedLiteral.Comparator()</code> now orders <code>-0.0</code> before <code>+0.0</code> and NaN after all other values; NaN compares equal to NaN. Callers that use these public comparators may see a different order or equality result.</p>
+</li>
+<li>
+<p><strong>Table creation rejects duplicate field IDs.</strong> <code>NewMetadata</code>, and <code>CreateTable</code> on catalogs that build metadata through it (not REST), now return <code>ErrInvalidSchema</code> when two fields in the schema share an ID, including unset <code>0</code> or <code>-1</code> IDs, even for unpartitioned, unsorted tables. Before, the partition spec or sort order could bind to the wrong column. Callers should assign unique IDs (or let the schema be built with fresh IDs). This matches Java, whose <code>Schema</code> constructor rejects duplicate IDs.</p>
+</li>
+<li>
+<p><strong>Sort order replacements reuse orders staged earlier in the same transaction.</strong> If a transaction replaces order A with B and then returns to A, A becomes the default again instead of B. The final update reuses A's ID instead of adding another definition. Reuse of orders from earlier commits was already supported.</p>
+</li>
+<li>
+<p><strong>Case-insensitive field binding rejects only ambiguous names.</strong> <code>Reference.Bind</code> and <code>Schema.Select</code> return <code>ErrInvalidSchema</code> when the requested case-insensitive name matches different field IDs, and the error includes both names. Unrelated names remain available to scans, writes, and schema, partition, and sort order updates.</p>
+</li>
+<li>
+<p><strong>Delete files now have a separate 64 MiB target.</strong> Equality-delete and v2 position-delete files previously used <code>write.target-file-size-bytes</code> (512 MiB by default, or the table's override) as their file-size target. They now use <code>write.delete.target-file-size-bytes</code>, which defaults to 64 MiB. After upgrading, tables may produce more, smaller delete files unless this new property is set. To preserve the previous delete-file size target, set <code>write.delete.target-file-size-bytes</code> to the table's former effective <code>write.target-file-size-bytes</code> value (<code>536870912</code> when the data-file target was unset). The data-file target itself is unchanged.</p>
+</li>
+<li>
 <p><strong>Schema reads now reject invalid identifier fields.</strong> Table and view metadata with <code>identifier-field-ids</code> referring to an optional, float/double, missing, non-primitive, or improperly nested field now fails to load with <code>invalid schema</code> (for example, <code>invalid schema: identifier field &quot;foo&quot; must be required</code> or <code>invalid schema: identifier field &quot;foo&quot; cannot be float or double</code>). Older iceberg-go releases could load such metadata, but Java Iceberg already rejects it. To recover an affected table, back up its metadata and use an atomic catalog metadata repair to remove the invalid identifier IDs or replace them with IDs of existing, required, non-floating primitive fields nested only in required structs. Do not edit the currently referenced metadata file in place. Repeated identifier IDs are deduplicated on read.</p>
+</li>
+<li>
+<p><strong>Schema JSON defaults preserve integer precision.</strong> <code>long</code> defaults now decode as <code>int64</code> instead of <code>float64</code>; non-integral, non-numeric, or out-of-range values now fail to parse. Numeric literals inside object and list defaults decode as <code>json.Number</code> rather than <code>float64</code>.</p>
 </li>
 <li>
 <p><strong><code>StructType.Fields()</code> returns a copy.</strong> Changing the returned slice no longer changes the struct, matching <code>ListType.Fields()</code> and <code>MapType.Fields()</code>. Build a new type with <code>NewStructType</code> instead. <code>NumFields()</code> and <code>Field(i)</code> read fields without copying, and <code>NewListType</code> and <code>NewMapType</code> are the constructors for the other nested types. The exported fields are unchanged for now; they become unexported before v1.0.0 (see <a href="https://github.com/apache/iceberg-go/issues/2062">#2062</a>).</p>
@@ -2879,7 +3083,13 @@ make integration-external-rest
 <p><strong>Partitioned data files follow the table's location provider.</strong> With <code>write.object-storage.enabled=true</code> and the default <code>write.object-storage.partitioned-paths=true</code>, new partitioned files land under <code>data/&lt;hash&gt;/&lt;partition&gt;/</code> instead of <code>data/&lt;partition&gt;/&lt;hash&gt;/</code>, which can affect prefix-based lifecycle rules and bucket policies. <code>write.object-storage.partitioned-paths=false</code> and <code>write.data.path</code> now apply to partitioned writes. Partitioned paths also no longer percent-encode the table location: <code>s3://bucket/my table</code> stays literal instead of becoming <code>my%20table</code>, as for unpartitioned writes. Existing files stay where they are.</p>
 </li>
 <li>
-<p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST, Hive, and SQL), while REST also implements <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
+<p><strong>External object-store data paths include table context.</strong> For object-storage tables whose <code>write.data.path</code> is outside the table location, new data files now use <code>&lt;hash&gt;/&lt;db&gt;/&lt;table&gt;/...</code> after the shared storage prefix. This applies whether <code>write.object-storage.partitioned-paths</code> is <code>true</code> or <code>false</code>. The new prefixes may affect prefix-based lifecycle rules and bucket policies. Existing data files do not move.</p>
+</li>
+<li>
+<p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST, Hive, and SQL), while REST also implements <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. REST and SQL implement <code>RenamableViewCatalog</code> for <code>RenameView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
+</li>
+<li>
+<p><strong>Rename IO methods take a context.</strong> <code>RenameIO.Rename</code> and <code>RenameNoReplaceIO.RenameNoReplace</code> now take <code>context.Context</code> first, so custom implementations and callers must update.</p>
 </li>
 <li>
 <p><strong><code>ReplaceFilesWithDeleteFiles</code> removed.</strong> For delete-file replacements, use <code>tx.NewRewrite(snapshotProps)</code>, call <code>DeleteFile</code> for each source file and <code>AddDeleteFileWithDataSequenceNumber</code> for each replacement, then commit the builder. Rewrites record a <code>replace</code> snapshot instead of <code>overwrite</code>. The five-argument <code>ReplaceFiles</code> API is unchanged and remains available for compaction and delete-file removals.</p>
@@ -2994,6 +3204,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> is removed. Replace <code>cat.(catalog.Closer)</code> checks with <code>defer cat.Close()</code>; <code>catalog.Catalog</code> already implements <code>io.Closer</code>, so no type assertion is needed.</p>
+</li>
+<li>
+<p><strong><code>table.ErrDataFilesMissing</code> no longer matches <code>table.ErrCommitFailed</code>.</strong> An operation that adds delete files referencing data files that are not live, for example because a concurrent commit removed them, fails with <code>ErrDataFilesMissing</code>. The error is now terminal, like <code>table.ErrCommitDiverged</code>, matching Java's <code>ValidationException</code>, so code that retries when <code>errors.Is(err, table.ErrCommitFailed)</code> no longer retries it. When <code>Transaction.Commit</code> returns it, the error also matches <code>table.ErrTransactionUnusable</code>. Rebuild the delete against the current table instead.</p>
 </li>
 <li>
 <p><strong>Puffin writer property setter renamed.</strong> <code>puffin.Writer.AddProperties</code> is now <code>puffin.Writer.SetProperties</code>. Repeated calls still merge keys; use <code>ClearProperties</code> to clear custom properties before finishing.</p>
