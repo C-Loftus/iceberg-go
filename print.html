@@ -342,7 +342,7 @@ func openCatalog(ctx context.Context) (*sqlcat.Catalog, error) {
     if err != nil {
         return nil, err
     }
-    return sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+    return sqlcat.NewCatalog(ctx, &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
         &quot;warehouse&quot;:            &quot;file:///tmp/iceberg-tutorial&quot;,
         &quot;init_catalog_tables&quot;:  &quot;true&quot;,
     })
@@ -562,6 +562,16 @@ catalog:
 <p>Each catalog package exposes its own functional <code>Option</code> set. The lists below reflect the public option surface; <code>pkg.go.dev</code> is authoritative for the current set.</p>
 <h3 id="rest-catalogrest"><a class="header" href="#rest-catalogrest">REST (<code>catalog/rest</code>)</a></h3>
 <p>The most option-rich surface. Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/options.go"><code>catalog/rest/options.go</code></a>.</p>
+<p>When <code>GET /v1/config</code> returns a non-null <code>idempotency-key-lifetime</code>, the client
+sends fresh UUIDv7 <code>Idempotency-Key</code> headers on namespace, table, view and
+transaction mutations, including create view, and on scan cancellation. After
+negotiation, a configured default <code>Idempotency-Key</code> is dropped from all requests
+when the server advertises a lifetime; the initial <code>GET /v1/config</code> may still
+carry it because advertisement is not yet known. Scan plan and task requests
+send keys independently of this advertisement and have a separate retry policy.
+Go's standard HTTP transport may replay certain failed requests on reused
+connections with the same key. The advertised lifetime is not currently enforced,
+including zero or malformed values.</p>
 <div class="table-wrapper"><table><thead><tr><th>Group</th><th>Options</th></tr></thead><tbody>
 <tr><td>Authentication</td><td><code>WithCredential</code>, <code>WithOAuthToken</code>, <code>WithAuthManager</code>, <code>NewOauth2AuthManager</code>, <code>WithAuthURI</code>, <code>WithScope</code>, <code>WithAudience</code>, <code>WithResource</code></td></tr>
 <tr><td>AWS SigV4</td><td><code>WithSigV4</code>, <code>WithSigV4RegionSvc</code>, <code>WithSigner</code></td></tr>
@@ -703,6 +713,7 @@ assume parity on it in multi-client deployments.</p>
 <div class="table-wrapper"><table><thead><tr><th>Property</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>iceberg.hive.lock-check-min-wait-ms</code></td><td><code>50</code></td><td>Minimum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key.</td></tr>
 <tr><td><code>iceberg.hive.lock-check-max-wait-ms</code></td><td><code>5000</code></td><td>Maximum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key.</td></tr>
+<tr><td><code>iceberg.hive.lock-heartbeat-interval-ms</code></td><td><code>240000</code></td><td>Interval between view lock renewals, in milliseconds. Set it below the metastore lock timeout.</td></tr>
 <tr><td><code>lock-check-min-wait-time</code> / <code>lock-check-max-wait-time</code></td><td>same defaults</td><td>Legacy Go aliases that accept Go duration strings (e.g. <code>100ms</code>, <code>5s</code>). Ignored when the corresponding Java key is set.</td></tr>
 <tr><td><code>lock-check-retries</code></td><td><code>4</code></td><td>Go-specific upper bound on check attempts. Java instead uses <code>iceberg.hive.lock-timeout-ms</code> (not wired in Go yet).</td></tr>
 </tbody></table>
@@ -717,7 +728,7 @@ assume parity on it in multi-client deployments.</p>
 <h3 id="sql-catalogsql"><a class="header" href="#sql-catalogsql">SQL (<code>catalog/sql</code>)</a></h3>
 <p>The SQL catalog has no functional-option surface. Construct it with <code>NewCatalog</code>:</p>
 <pre><code class="language-go">db, _ := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
-cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(ctx, &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
 </code></pre>
@@ -738,7 +749,7 @@ import _ &quot;github.com/apache/iceberg-go/io/gocloud/azure&quot; // abfs, abfs
 <p>Without a matching blank import, these schemes return <code>ErrIOSchemeNotFound</code> with a hint naming the package to import.</p>
 <p>All credential and tuning property keys are constants in <a href="https://github.com/apache/iceberg-go/blob/main/io/config.go"><code>io/config.go</code></a>. They can be supplied through table properties, catalog properties, or per-call <code>iceberg.Properties</code> arguments depending on context.</p>
 <h3 id="s3"><a class="header" href="#s3">S3</a></h3>
-<p>Authentication is resolved in this order (<code>io/gocloud/s3/s3.go</code>):</p>
+<p>When remote signing is disabled, authentication is resolved in this order (<code>io/gocloud/s3/s3.go</code>):</p>
 <ol>
 <li>Static credentials in properties: <code>s3.access-key-id</code> + <code>s3.secret-access-key</code> (+ optional <code>s3.session-token</code>).</li>
 <li>The standard AWS SDK v2 default credential chain - environment variables (<code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code>), <code>~/.aws/credentials</code>, container/IAM role.</li>
@@ -754,9 +765,33 @@ import _ &quot;github.com/apache/iceberg-go/io/gocloud/azure&quot; // abfs, abfs
 <tr><td><code>s3.connect-timeout</code> (<code>io.S3ConnectTimeout</code>)</td><td>Either a number of seconds (<code>&quot;60&quot;</code>, <code>&quot;60.0&quot;</code>) or a Go duration (<code>&quot;5s&quot;</code>).</td></tr>
 <tr><td><code>s3.force-virtual-addressing</code> (<code>io.S3ForceVirtualAddressing</code>)</td><td>Force virtual-host-style addressing.</td></tr>
 <tr><td><code>s3.compat-mode</code> (<code>io.S3CompatMode</code>)</td><td>Enable for non-AWS S3 endpoints. Defaults to off.</td></tr>
-<tr><td><code>s3.signer.uri</code> (<code>io.S3SignerURI</code>)</td><td>Reserved for remote-signing endpoint (not yet implemented).</td></tr>
+<tr><td><code>s3.remote-signing-enabled</code> (<code>io.S3RemoteSigningEnabled</code>)</td><td>Set to <code>true</code> to have a REST service sign S3 requests. Defaults to <code>false</code>.</td></tr>
+<tr><td><code>s3.signer.uri</code> (<code>io.S3SignerURI</code>)</td><td>Legacy signing service base URI. Requests use <code>&lt;base&gt;/v1/aws/s3/sign</code>.</td></tr>
 </tbody></table>
 </div>
+<p>With remote signing enabled, S3 uses anonymous SDK credentials and obtains each
+request's signature from the signing service. No local AWS credentials are needed.
+REST catalogs use the table's <code>/sign</code> endpoint by default and pass through the
+response's <code>remote-signing-config</code> headers and properties. When that config is
+present, legacy <code>signer.endpoint</code>, <code>signer.uri</code>, and <code>s3.signer.uri</code> settings
+are ignored. <code>rest.remote-signing.endpoint</code> can explicitly override the default.
+It may be an absolute URL or a path relative to the catalog URI.
+Legacy settings are supported when the response has no remote signing config.</p>
+<p>A table-specific token takes precedence over the catalog token. The catalog's
+refreshing authentication is reused only when the signer shares the catalog's
+origin. For a separate signing service, use the headers supplied in
+<code>remote-signing-config</code> or a table-specific token. For a standalone S3 FileIO,
+set <code>s3.signer.uri</code>, <code>s3.region</code>, and an optional <code>token</code> for the signing service.
+When also supplying <code>rest.remote-signing.config</code>, set
+<code>rest.remote-signing.endpoint</code> to the complete signing endpoint instead.</p>
+<p>Object uploads use unsigned payloads. Only bulk-delete XML bodies are sent to the
+signer. Streaming signatures (<code>aws-chunked</code>) are unsupported. Caller-supplied
+checksum values are preserved; an upload that sets <code>ChecksumAlgorithm</code> must also
+supply its checksum value. Signing requests use the caller's context and a
+30-second timeout unless the HTTP client has a configured timeout.
+Remote signing accepts a standard <code>*http.Client</code> or the AWS SDK's buildable client
+for S3 requests so redirects can be disabled. Other custom HTTP clients are rejected.
+S3 requests must resolve to SigV4; SigV4a and S3 Express signing are not supported.</p>
 <h3 id="google-cloud-storage"><a class="header" href="#google-cloud-storage">Google Cloud Storage</a></h3>
 <p>Authentication resolution (<code>io/gocloud/gcs/gcs.go</code>):</p>
 <ol>
@@ -977,6 +1012,9 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.compression-level.column.&lt;name&gt;</code></td><td>Global level, or the column codec's default if the codecs differ</td></tr>
 <tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
 <tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-fpp.column.&lt;name&gt;</code></td><td>0.01 (per-column false-positive probability, strictly between 0 and 1)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-ndv.column.&lt;name&gt;</code></td><td>unset (expected distinct values; positive integer up to 4,294,967,295)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-adaptive-enabled</code></td><td><code>false</code> (size enabled Bloom filters to observed NDV unless a per-column NDV is specified)</td></tr>
 <tr><td><code>write.parquet.stats-enabled.column.&lt;name&gt;</code></td><td><code>true</code> (per-column Parquet statistics toggle)</td></tr>
 <tr><td><code>parquet.enable.dictionary</code></td><td><code>true</code> (global dictionary encoding switch; same key as Iceberg Java)</td></tr>
 <tr><td><code>write.parquet.dict-encoding-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched; overrides the global switch)</td></tr>
@@ -984,14 +1022,26 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.variant-inference-buffer-size</code></td><td>100 rows (buffered per file to infer the shredding schema)</td></tr>
 </tbody></table>
 </div>
-<p>The bloom filter, statistics, and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>. Statistics settings apply to data files and use Iceberg field names, including nested paths such as <code>items.element</code>. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other metadata may still be recorded.</p>
+<p>The bloom filter, statistics, and dictionary toggles follow Iceberg Java parsing: only <code>true</code>
+(case-insensitive) enables a toggle; other values, including <code>1</code>, are false. Bloom filters remain
+disabled for a column unless its enabled toggle is set. When adaptive sizing is enabled, an explicit
+column NDV takes precedence. Adaptive sizing rejects FPP values extremely close to 1 that could make
+the writer hang.</p>
+<p>Statistics settings apply to data files and use Iceberg field names, including nested paths such as
+<code>items.element</code>. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other
+metadata may still be recorded.</p>
 <p>Column compression keys use case-sensitive Iceberg leaf paths, such as
 <code>items.element</code> or <code>attributes.value.name</code>. They apply to data files and use
 the global settings for columns without overrides. An explicit column level
 must be an integer valid for its effective codec. Missing fields are ignored.
 Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
 these keys. Arrow does not register legacy <code>lz4</code> or <code>lzo</code> codecs by default;
-<code>lz4_raw</code> is supported.</p>
+<code>lz4_raw</code> is supported.
+Bloom column settings use Iceberg names, including <code>items.element</code> and
+<code>lookup.value</code>. Writers resolve these to the physical Parquet paths. Existing
+physical-path settings remain supported; logical names take precedence when
+both are present. Logical settings follow column renames and are removed when
+the column is deleted. Data-column Bloom settings do not apply to delete files.</p>
 <p>Equality-delete and v2 position-delete Parquet writers also support these
 overrides, defined in <code>table/properties.go</code>. Unset overrides inherit the
 corresponding <code>write.parquet.*</code> setting and its default. If the delete codec
@@ -1349,7 +1399,7 @@ cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http:/
 
 db, err := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
 // handle err
-cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(context.Background(), &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
 </code></pre>
@@ -1369,7 +1419,7 @@ cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
     &quot;github.com/apache/iceberg-go/catalog/hive&quot;
 )
 
-cat, err := hive.NewCatalog(iceberg.Properties{},
+cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI(&quot;thrift://localhost:9083&quot;),
     hive.WithWarehouse(&quot;s3://my-bucket/warehouse&quot;))
 </code></pre>
@@ -1867,6 +1917,33 @@ reported as issues rather than silently accepted.</p>
 <a href="https://iceberg.apache.org/spec/#content-file-uniqueness">Iceberg spec</a>
 and <a href="https://iceberg.apache.org/spec/#manifest-lists">manifest list spec</a>.</p>
 <h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
+<h3 id="partition-statistics-v1-v3"><a class="header" href="#partition-statistics-v1-v3">Partition statistics (v1-v3)</a></h3>
+<p><code>ComputePartitionStatistics</code> writes a Parquet statistics file for the transaction's
+current branch head and stages its registration. Use a fresh transaction and
+commit it to publish the reference:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+stats, err := txn.ComputePartitionStatistics(ctx)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>The operation recomputes statistics from live manifest entries without reading
+data files, delete-file contents, or Puffin blobs. It groups rows by partition
+spec ID and partition tuple and sorts by the unified tuple with NULL first.
+V2 includes position and equality delete metrics. V3 also counts deletion vectors
+in <code>dv_count</code>; their records contribute to <code>position_delete_record_count</code>, while
+<code>position_delete_file_count</code> counts classic files only, including V2 files
+retained after an upgrade.</p>
+<p><code>total_record_count</code> is exact for tables without deletes and for DV-only tables
+whose live targets, partitions, sequence numbers, and record counts can be
+validated from metadata. A live classic position or equality delete makes this
+field NULL for every partition, since deletes may apply across specs. Unknown DV
+sequence numbers also leave the affected total NULL. Optional last-updated
+fields are left NULL. <code>PartitionStatisticsSchema</code> exposes the versioned schema;
+<code>PartitionStatisticsSchemaV1</code> remains available.</p>
+<p>The table must have a snapshot and at least one partition field in its spec
+history. Dropped partition source fields and changed transform result types are
+not supported. A concurrent change to the target branch, current schema, or
+partition layout rejects the commit. Statistics do not create a new snapshot.</p>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
     &quot;time&quot;
@@ -1908,6 +1985,13 @@ result, err := txn.RewriteDataFiles(ctx, groups /* from plan.Groups */, table.Re
 })
 </code></pre>
 <p>When every file of a group already records the order's <code>sort_order_id</code> (for example, files written by an earlier sort rewrite), every sort field is identity, and no partition of the group has more files than the scan concurrency (<code>table.WithCompactionScanConcurrency</code>, <code>GOMAXPROCS</code> by default), the files are streamed and merged, holding up to about five batches per file instead of the whole group. Otherwise a sort rewrite holds each group decoded in memory, and with the batches queued for the writer that can reach about twice the group's decoded size, so keep <code>compaction.Config.MaxGroupSizeBytes</code> within what one rewrite can hold. The first sort rewrite of a table always takes this in-memory path, since its files do not record the order yet. The CLI equivalent is <code>iceberg compact run --sort [--rewrite-all] [--max-group-size BYTES]</code>, which uses the table's default sort order.</p>
+<p>To cluster spatially instead, pass <code>table.WithCompactionGeometryHilbertOrder</code> with the name of a top-level geometry or geography column. Each partition of a group is ordered along a Hilbert curve over the centre of every geometry's XY bounding box, snapped to a grid of <code>2^bits</code> cells per axis (<code>table.WithHilbertBits</code>, 16 by default) over the extent of the data (<code>table.WithHilbertBounds</code> fixes the extent). Rows close in space tend to share the same file and row group, so per-file geometry bounds overlap little and spatial filters prune files. Rows with no location (a null or empty geometry) go last. Geography is accepted but ordered on planar x/y, with no antimeridian wrapping. This is not the multi-column <code>hilbert(c1, c2)</code> sort order of Java's rewrite procedure; it orders one geometry column by location. A Hilbert rewrite always holds the whole group decoded in memory, so keep <code>compaction.Config.MaxGroupSizeBytes</code> within what one rewrite can hold. The option cannot be combined with <code>table.WithCompactionSortOrder</code>, and because a Hilbert order is not an Iceberg sort order, output files record no <code>sort_order_id</code>:</p>
+<pre><code class="language-go">result, err := txn.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{
+    GroupOptions: []table.CompactionGroupOption{
+        table.WithCompactionGeometryHilbertOrder(&quot;geom&quot;, table.WithHilbertBits(12)),
+    },
+})
+</code></pre>
 <h3 id="expiring-snapshots"><a class="header" href="#expiring-snapshots">Expiring snapshots</a></h3>
 <pre><code class="language-go">import (
     &quot;time&quot;
@@ -2801,6 +2885,7 @@ make integration-external-rest
 <pre><code class="language-bash">REST_CATALOG_URI=http://localhost:8181 REST_CATALOG_CREDENTIAL= REST_CATALOG_SCOPE= REST_CATALOG_WAREHOUSE= \
   make integration-external-rest
 </code></pre>
+<p>The nested namespace tests are off by default. Set <code>REST_CATALOG_NESTED_NAMESPACES=true</code> to run them against a catalog that lists only direct children and refuses to drop a namespace with children; CI sets it for Polaris.</p>
 <div style="break-before: page; page-break-before: always;"></div><!--
   ~ Licensed to the Apache Software Foundation (ASF) under one
   ~ or more contributor license agreements.  See the NOTICE file
@@ -3035,6 +3120,21 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong><code>RowDelta.Commit</code> can be called once per builder.</strong> A second <code>Commit</code> on the same <code>RowDelta</code> now returns an error wrapping <code>table.ErrInvalidOperation</code> and stages nothing, even if the first call failed, as <code>RewriteFiles.Commit</code> does. Previously, calling <code>Commit</code> again after a failed first call could succeed, and calling it again after a successful one staged the builder's files a second time. Create a new builder with <code>Transaction.NewRowDelta</code> for each commit.</p>
+</li>
+<li>
+<p><strong>Data-file replacements now reject concurrent deletes.</strong> Commits staged through <code>ReplaceDataFiles</code>, <code>ReplaceDataFilesByPath</code>, <code>ReplaceFiles</code>, or rewrite operations can return <code>table.ErrConflictingDeleteFiles</code> when a concurrent position delete targets a replaced file or any concurrent equality delete is added. Compaction on tables with streaming equality deletes may see additional conflicts.</p>
+</li>
+<li>
+<p><strong>Orphan cleanup now rejects <code>gc.enabled=false</code>.</strong> <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, and dry runs now return an error before filesystem access. The <code>iceberg clean-orphan-files</code> command is also affected.</p>
+</li>
+<li>
+<p><strong>Partition specs reject source types a transform cannot handle.</strong> Creating or updating a spec with an incompatible source, such as <code>day(string)</code>, now fails. Writes to existing incompatible specs return <code>ErrInvalidTransform</code> instead of writing null partition values.</p>
+</li>
+<li>
+<p><strong>Invalid name mappings now stop scans and add-files.</strong> Tables with an unparseable <code>schema.name-mapping.default</code> now return <code>ErrInvalidMetadata</code> on scans and add-files instead of ignoring the mapping. Fix the property with a valid mapping or remove it.</p>
+</li>
+<li>
 <p><strong>SigV4 keeps the token or credential as <code>Original-Authorization</code>.</strong> With <code>rest.sigv4-enabled=true</code> (or <code>rest.auth.type=sigv4</code>) and a <code>token</code> or <code>credential</code>, requests used to be signed with the token silently dropped, because the SigV4 signature replaced the <code>Authorization</code> header. They now carry it as <code>Original-Authorization</code>, included in the signed headers, as Iceberg Java does. A server behind SigV4 that ignores the header is unaffected.</p>
 </li>
 <li>
@@ -3042,6 +3142,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Table creation rejects duplicate field IDs.</strong> <code>NewMetadata</code>, and <code>CreateTable</code> on catalogs that build metadata through it (not REST), now return <code>ErrInvalidSchema</code> when two fields in the schema share an ID, including unset <code>0</code> or <code>-1</code> IDs, even for unpartitioned, unsorted tables. Before, the partition spec or sort order could bind to the wrong column. Callers should assign unique IDs (or let the schema be built with fresh IDs). This matches Java, whose <code>Schema</code> constructor rejects duplicate IDs.</p>
+</li>
+<li>
+<p><strong>Struct defaults must be empty objects.</strong> Non-null <code>initial-default</code> and <code>write-default</code> values for struct fields must be <code>{}</code>; defaults for nested fields belong on those fields. Tables with populated struct defaults written by older iceberg-go versions still load, but <code>AddSchema</code> validates the entire resulting schema. Any schema update, including one that changes an unrelated column, will fail until the populated default is cleared.</p>
 </li>
 <li>
 <p><strong>Sort order replacements reuse orders staged earlier in the same transaction.</strong> If a transaction replaces order A with B and then returns to A, A becomes the default again instead of B. The final update reuses A's ID instead of adding another definition. Reuse of orders from earlier commits was already supported.</p>
@@ -3053,10 +3156,22 @@ make integration-external-rest
 <p><strong>Delete files now have a separate 64 MiB target.</strong> Equality-delete and v2 position-delete files previously used <code>write.target-file-size-bytes</code> (512 MiB by default, or the table's override) as their file-size target. They now use <code>write.delete.target-file-size-bytes</code>, which defaults to 64 MiB. After upgrading, tables may produce more, smaller delete files unless this new property is set. To preserve the previous delete-file size target, set <code>write.delete.target-file-size-bytes</code> to the table's former effective <code>write.target-file-size-bytes</code> value (<code>536870912</code> when the data-file target was unset). The data-file target itself is unchanged.</p>
 </li>
 <li>
+<p><strong>Schema updates reject read-time type casts.</strong> <code>UpdateSchema.UpdateColumn</code> now allows only Iceberg schema promotions. Changes such as <code>string</code> to <code>binary</code> and <code>fixed[16]</code> to <code>uuid</code> are rejected by default.</p>
+</li>
+<li>
 <p><strong>Schema reads now reject invalid identifier fields.</strong> Table and view metadata with <code>identifier-field-ids</code> referring to an optional, float/double, missing, non-primitive, or improperly nested field now fails to load with <code>invalid schema</code> (for example, <code>invalid schema: identifier field &quot;foo&quot; must be required</code> or <code>invalid schema: identifier field &quot;foo&quot; cannot be float or double</code>). Older iceberg-go releases could load such metadata, but Java Iceberg already rejects it. To recover an affected table, back up its metadata and use an atomic catalog metadata repair to remove the invalid identifier IDs or replace them with IDs of existing, required, non-floating primitive fields nested only in required structs. Do not edit the currently referenced metadata file in place. Repeated identifier IDs are deduplicated on read.</p>
 </li>
 <li>
+<p><strong>Table history logs reject missing or null required fields.</strong> Loading table metadata now fails with <code>table.ErrInvalidMetadata</code> if a <code>snapshot-log</code> entry omits or sets <code>snapshot-id</code> or <code>timestamp-ms</code> to <code>null</code>, or a <code>metadata-log</code> entry omits or sets <code>metadata-file</code> or <code>timestamp-ms</code> to <code>null</code>. Older iceberg-go releases silently accepted omitted or null fields as zero values, but Java Iceberg already rejects such metadata. Explicit zero values remain valid. Repair affected metadata through an atomic catalog metadata replacement instead of editing the currently referenced metadata file in place.</p>
+</li>
+<li>
+<p><strong><code>UpdateSchema</code> rejects deleting an identifier field.</strong> <code>DeleteColumn</code> on an identifier column used to succeed and quietly drop the column from the table's identifier fields. Now <code>Apply</code> (and <code>Commit</code>) fails with <code>cannot delete identifier field …</code>, as in Java. Deleting a struct that contains one already failed, and now reports <code>cannot delete field … as it will delete nested identifier field …</code>. To delete the column anyway, also call <code>SetIdentifierField</code> with the identifier fields the schema should keep (for example <code>SetIdentifierField([][]string{})</code> to clear them). This also stops a new column that reuses a deleted identifier column's name from becoming the identifier.</p>
+</li>
+<li>
 <p><strong>Schema JSON defaults preserve integer precision.</strong> <code>long</code> defaults now decode as <code>int64</code> instead of <code>float64</code>; non-integral, non-numeric, or out-of-range values now fail to parse. Numeric literals inside object and list defaults decode as <code>json.Number</code> rather than <code>float64</code>.</p>
+</li>
+<li>
+<p><strong>REST mutation keys can enable transport replay.</strong> Namespace, table, view, transaction and scan-cancellation mutations listed in the <a href="./configuration.html">REST catalog documentation</a> now carry fresh UUIDv7 <code>Idempotency-Key</code> headers when <code>GET /v1/config</code> returns a non-null <code>idempotency-key-lifetime</code>. Go's HTTP transport may replay certain failed requests on reused connections with the same key; the advertised lifetime is not yet enforced. Scan plan and task key handling is unchanged. When a lifetime is advertised, a default <code>Idempotency-Key</code> configured via <code>WithHeaders</code> is dropped after <code>GET /v1/config</code>.</p>
 </li>
 <li>
 <p><strong><code>StructType.Fields()</code> returns a copy.</strong> Changing the returned slice no longer changes the struct, matching <code>ListType.Fields()</code> and <code>MapType.Fields()</code>. Build a new type with <code>NewStructType</code> instead. <code>NumFields()</code> and <code>Field(i)</code> read fields without copying, and <code>NewListType</code> and <code>NewMapType</code> are the constructors for the other nested types. The exported fields are unchanged for now; they become unexported before v1.0.0 (see <a href="https://github.com/apache/iceberg-go/issues/2062">#2062</a>).</p>
@@ -3068,10 +3183,25 @@ make integration-external-rest
 <p><strong>Commits retry conflicts by default.</strong> <code>commit.retry.num-retries</code> now defaults to <code>4</code>, as in Java and PyIceberg, so <code>Commit</code> refreshes and replays a conflicting commit up to four times before returning <code>ErrCommitFailed</code>. Set it to <code>0</code> to keep failing on the first conflict. <code>table.CommitNumRetriesDefault</code> changes from <code>0</code> to <code>4</code>.</p>
 </li>
 <li>
+<p><strong>Schema updates assert the last assigned field ID.</strong> When <code>UpdateSchema</code> adds a schema, the commit now also requires the table's <code>last-column-id</code> to match the transaction's base, as Iceberg Java does. A stale writer whose base predates another writer's column additions now fails with <code>table.ErrCommitFailed</code> instead of reusing field IDs. Reload the table and reapply the schema change.</p>
+</li>
+<li>
 <p><strong>Schemas store binary and fixed defaults as hex strings.</strong> <code>NewSchema</code>, <code>NewSchemaWithIdentifiers</code> and <code>UpdateSchema.AddColumn</code> (through <code>Apply()</code>) convert <code>[]byte</code>, <code>BinaryLiteral</code> and <code>FixedLiteral</code> defaults of binary and fixed fields, including fields nested in structs, lists and maps, to the lowercase hex string iceberg-go writes to metadata JSON, so a field read back from a schema holds a <code>string</code> such as <code>&quot;0aff&quot;</code>. Code that type-asserts these defaults to <code>[]byte</code> must decode the string instead, for example with <code>hex.DecodeString</code>. A schema built in process now equals the same schema read from metadata with lowercase hex. <code>Equals</code> compares the strings case-sensitively, and Java writes uppercase hex (see <a href="https://github.com/apache/iceberg/issues/18352">apache/iceberg#18352</a>). The fields and types passed in are not modified.</p>
 </li>
 <li>
 <p><strong>Predicates reject NaN literals when bound.</strong> <code>EqualTo</code>, <code>NotEqualTo</code>, <code>LessThan</code>, <code>LessThanEqual</code>, <code>GreaterThan</code>, <code>GreaterThanEqual</code>, <code>IsIn</code>, <code>NotIn</code> and <code>LiteralPredicate</code>/<code>SetPredicate</code> with a NaN float literal now fail in <code>Bind</code> with <code>ErrInvalidArgument</code>, as Java does. That includes the string <code>&quot;NaN&quot;</code> on a float column and a NaN on a decimal column, which used to bind as zero. Scans, <code>ExpressionEvaluator</code> and the metrics evaluators all bind first, so they return the error too. Use <code>IsNaN</code> and <code>NotNaN</code> to match NaN values.</p>
+</li>
+<li>
+<p><strong>Out-of-range nanosecond timestamp strings are rejected.</strong> String literals for <code>timestamp_ns</code> and <code>timestamptz_ns</code> outside the signed 64-bit nanosecond range now fail expression binding with <code>ErrBadCast</code>. Scans and <code>ExpressionEvaluator</code> return the error for these filters instead of comparing a wrapped value.</p>
+</li>
+<li>
+<p><strong><code>VisitBoundPredicateRef</code> is removed.</strong> It was meant only for evaluators inside iceberg-go. Visitors in other modules should call <code>VisitBoundPredicate</code>, which passes <code>VisitIn</code> and <code>VisitNotIn</code> a detached copy of the predicate's literal set, as before.</p>
+</li>
+<li>
+<p><strong>Empty string partition bounds are written as non-null bytes.</strong> New manifests preserve empty string lower and upper bounds, fixing filtered scans on identity partitions. Manifests written before this fix may retain null bounds for an empty string and can continue to skip matching rows until rewritten.</p>
+</li>
+<li>
+<p><strong>Name mapping rejects ambiguous aliases and duplicate field IDs.</strong> Scans of files without field IDs now return <code>ErrInvalidSchema</code> when the same name belongs to multiple mapped fields at one level, instead of silently choosing the first. Repeated names on one mapping entry and same names under separate structs remain valid. Reusing a field ID returns <code>ErrInvalidSchema</code> instead of panicking.</p>
 </li>
 <li>
 <p><strong>SQL view APIs align with <code>catalog.ViewCatalog</code>.</strong> <code>CreateView</code> now takes a <code>*view.Version</code>, schema and options, and returns <code>*view.View</code>. <code>LoadView</code> now returns <code>*view.View</code>; use <code>Metadata()</code> to access its metadata. If the caller leaves <code>DefaultCatalog</code> empty, SQL still sets it to the catalog name.</p>
@@ -3086,7 +3216,10 @@ make integration-external-rest
 <p><strong>External object-store data paths include table context.</strong> For object-storage tables whose <code>write.data.path</code> is outside the table location, new data files now use <code>&lt;hash&gt;/&lt;db&gt;/&lt;table&gt;/...</code> after the shared storage prefix. This applies whether <code>write.object-storage.partitioned-paths</code> is <code>true</code> or <code>false</code>. The new prefixes may affect prefix-based lifecycle rules and bucket policies. Existing data files do not move.</p>
 </li>
 <li>
-<p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST, Hive, and SQL), while REST also implements <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. REST and SQL implement <code>RenamableViewCatalog</code> for <code>RenameView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
+<p><strong>SQL catalog nested namespaces match the JDBC catalog.</strong> <code>sql.Catalog.ListNamespaces(ctx, parent)</code> returns only the direct children of <code>parent</code>, no longer <code>parent</code> itself or deeper descendants, and <code>ListNamespaces(ctx, nil)</code> returns the distinct first levels. A namespace that has no row of its own but has child namespaces, such as <code>a</code> after <code>CreateNamespace(a.b)</code>, now exists for listing, <code>CheckNamespaceExists</code>, <code>LoadNamespaceProperties</code>, <code>CreateTable</code>, <code>CreateView</code>, <code>CommitTable</code> creating a table with <code>AssertCreate</code>, and as the target of <code>RenameTable</code> and <code>RenameView</code>; only <code>CreateNamespace</code> and <code>UpdateNamespaceProperties</code> still need its own row. <code>DropNamespace</code> returns <code>catalog.ErrNamespaceNotEmpty</code> while child namespaces exist. Walk the hierarchy one level at a time, and drop children before their parent.</p>
+</li>
+<li>
+<p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST, Hive, and SQL), while REST, SQL, and Hive implement <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. REST and SQL implement <code>RenamableViewCatalog</code> for <code>RenameView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
 </li>
 <li>
 <p><strong>Rename IO methods take a context.</strong> <code>RenameIO.Rename</code> and <code>RenameNoReplaceIO.RenameNoReplace</code> now take <code>context.Context</code> first, so custom implementations and callers must update.</p>
@@ -3099,6 +3232,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Path-based data-file addition renamed.</strong> Replace <code>Transaction.AddFiles</code> with <code>AddDataFilesByPath</code>, <code>AddFilesOption</code> with <code>AddDataFilesByPathOption</code>, and <code>WithAddFilesConcurrency</code> with <code>WithAddDataFilesByPathConcurrency</code>. Behavior is unchanged.</p>
+</li>
+<li>
+<p><strong>Directory IO methods take a context.</strong> <code>RemoveAllIO.RemoveAll</code> and <code>MkdirAllIO.MkdirAll</code> now take <code>context.Context</code> first, so custom implementations and callers must update.</p>
 </li>
 <li>
 <p><strong>Manifest builder constructor renamed.</strong> Replace <code>iceberg.NewManifestFile(...)</code> with <code>iceberg.NewManifestBuilder(...)</code>. It still returns a <code>ManifestBuilder</code>.</p>
@@ -3131,6 +3267,9 @@ make integration-external-rest
 <p><strong>Hadoop catalog construction takes a context.</strong> <code>hadoop.NewCatalog(name, warehouse, props)</code> becomes <code>hadoop.NewCatalog(ctx, name, warehouse, props)</code>. The context bounds filesystem setup; the catalog's filesystem keeps its values but not its cancellation.</p>
 </li>
 <li>
+<p><strong>SQL and Hive catalog construction takes a context.</strong> <code>sql.NewCatalog(name, db, dialect, props)</code> becomes <code>sql.NewCatalog(ctx, name, db, dialect, props)</code>, and <code>hive.NewCatalog(props, opts...)</code> becomes <code>hive.NewCatalog(ctx, props, opts...)</code>. The context bounds the SQL table setup queries and is checked before the Hive metastore connect.</p>
+</li>
+<li>
 <p><strong>Config loading reports errors.</strong> <code>config.LoadConfig</code> now returns <code>([]byte, error)</code>, and <code>config.LoadConfigFile</code> is removed; call <code>LoadConfig</code> instead. A missing default <code>~/.iceberg-go.yaml</code> still returns no data and no error.</p>
 </li>
 <li>
@@ -3144,6 +3283,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Snapshot expiration now tolerates concurrent ref changes.</strong> If a concurrent commit moves a ref that the expiry read, a retry or later <code>Commit</code> replans instead of failing with <code>table.ErrCommitFailed</code>. The committed expiry can differ from <code>Transaction.StagedTable</code>. See <a href="./concurrent-writes.html#snapshot-expiration">Snapshot expiration</a> for cases that now fail with <code>table.ErrTransactionUnusable</code>.</p>
+</li>
+<li>
+<p><strong>RowDelta reports a concurrent deletion vector as a commit conflict.</strong> If a concurrent commit adds a deletion vector for a data file that a <code>RowDelta</code> also adds one for, <code>Transaction.Commit</code> now fails with an error matching <code>table.ErrConflictingDeleteFiles</code>, <code>table.ErrCommitFailed</code> and <code>table.ErrTransactionUnusable</code>, and the transaction cannot be committed again. Previously, the error matched none of them and the transaction stayed usable. To resolve the conflict, reload the table and commit a <code>RowDelta</code> that adds one deletion vector merging the positions of both vectors and removes the concurrent one with <code>RemoveDeletes</code>.</p>
 </li>
 <li>
 <p><strong>Schema JSON constructor uses the Go initialism.</strong> Replace <code>iceberg.NewSchemaFromJsonFields</code> with <code>iceberg.NewSchemaFromJSONFields</code>.</p>
